@@ -1,0 +1,42 @@
+import argparse
+import threading
+from logger import log
+from config import DATA_DIRECTORY, PROCESSING_MODE
+from file_watcher import start_file_watcher
+from kafka_consumer import process_kafka_stream
+
+def run_file_watcher():
+    log.info("Starting file watcher...")
+    start_file_watcher(DATA_DIRECTORY)
+
+def run_kafka_consumer():
+    log.info("Starting Kafka consumer (PySpark streaming)...")
+    process_kafka_stream()
+
+def main():
+    parser = argparse.ArgumentParser(description="Data Lake and Streaming Application")
+    parser.add_argument("--mode", choices=["stream", "batch"], default=PROCESSING_MODE,
+                        help="Processing mode: 'stream' for real-time or 'batch' for batch processing")
+    args = parser.parse_args()
+
+    if args.mode == "stream":
+        # Start both file watcher and Kafka consumer in parallel threads.
+        watcher_thread = threading.Thread(target=run_file_watcher, daemon=True)
+        consumer_thread = threading.Thread(target=run_kafka_consumer, daemon=True)
+
+        watcher_thread.start()
+        consumer_thread.start()
+
+        log.info("Both file watcher and Kafka consumer are running.")
+        watcher_thread.join()
+        consumer_thread.join()
+    else:
+        # For batch processing mode, you could invoke batch processing (not covered here).
+        from file_scanner import scan_filesystem
+        from data_lake import create_data_lake_entry
+        csv_files, _ = scan_filesystem(DATA_DIRECTORY)
+        for file in csv_files:
+            create_data_lake_entry(file)
+
+if __name__ == "__main__":
+    main()
