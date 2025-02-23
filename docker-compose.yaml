@@ -1,57 +1,4 @@
 services:
-  # Zookeeper service for Kafka coordination
-  zookeeper:
-    image: confluentinc/cp-zookeeper:latest
-    environment:
-      ZOOKEEPER_CLIENT_PORT: 2181
-      ZOOKEEPER_TICK_TIME: 2000
-    ports:
-      - "2181:2181"
-    healthcheck:
-      test: [ "CMD", "sh", "-c", "echo ruok | nc -w 5 localhost 2181" ]
-      interval: 10s
-      timeout: 5s
-      retries: 3
-
-
-  # Kafka broker service
-  kafka:
-    image: confluentinc/cp-kafka:latest
-    depends_on:
-      - zookeeper
-    ports:
-      - "9092:9092"
-      - "9093:9093"
-    environment:
-      KAFKA_BROKER_ID: 1
-      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
-      # Internal listener on port 9092 and external on 9093.
-      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,PLAINTEXT_HOST://localhost:9093
-      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
-      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
-    healthcheck:
-      test: [ "CMD", "bash", "-c", "nc -z localhost 9092" ]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-
-  # PostgreSQL service for RDBMS-based data lake storage
-  postgres:
-    image: postgres:13
-    environment:
-      POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: postgres
-      POSTGRES_DB: datalake
-    ports:
-      - "5432:5432"
-    volumes:
-      - pgdata:/var/lib/postgresql/data
-    healthcheck:
-      test: [ "CMD-SHELL", "pg_isready -U postgres" ]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-
   # Application container
   app:
     build:
@@ -66,13 +13,6 @@ services:
     volumes:
       - ./:/app
       - ${HOST_DATA_DIRECTORY}:/app/data
-    depends_on:
-      kafka:
-        condition: service_healthy
-      postgres:
-        condition: service_healthy
-      zookeeper:
-        condition: service_healthy
     ports:
       - "8000:8000"
     command: [ "python", "main.py", "--mode", "${PROCESSING_MODE}" ]
