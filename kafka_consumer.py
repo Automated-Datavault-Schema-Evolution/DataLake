@@ -3,75 +3,54 @@ import signal
 import sys
 import threading
 
-import psycopg2
-import psycopg2.extras
 from logger import log
 from pyspark.sql import SparkSession
 from pyspark.sql.functions import from_json, explode, col
 from pyspark.sql.types import StructType, StructField, StringType, ArrayType
 
 from config import KAFKA_BOOTSTRAP_SERVERS, KAFKA_TOPIC, LAKE_TYPE, DATA_DIRECTORY
-from data_lake import table_exists, create_table_if_not_exists, get_postgres_connection
+from data_lake import bulk_insert_dataframe
 
 spark = None
 query = None
 
 
 def write_to_postgres(batch_df, batch_id):
-    pdf = batch_df.toPandas()
-    log.debug(f"Batch {batch_id}: Converted Spark DataFrame to Pandas with shape {pdf.shape}")
-    if pdf.empty:
-        log.info(f"Batch {batch_id} is empty. Skipping.")
-        return
-    table_name = pdf.iloc[0]['filename']
-    log.debug(f"Batch {batch_id}: Using target table '{table_name}'.")
-    pdf = pdf.drop(columns=['filename'])
-    log.debug(f"Batch {batch_id}: DataFrame shape after dropping 'filename': {pdf.shape}")
-    if "insertion_timestamp" not in pdf.columns:
-        from datetime import datetime
-        pdf["insertion_timestamp"] = datetime.now()
-        log.debug(f"Batch {batch_id}: Added insertion_timestamp column.")
-    if not table_exists(table_name):
-        log.info(f"Table '{table_name}' does not exist. Creating table.")
-        create_table_if_not_exists(table_name, pdf)
-    else:
-        log.info(f"Table '{table_name}' exists. Appending data.")
-    columns = list(pdf.columns)
-    col_names = ", ".join([f'"{col}"' for col in columns])
-    insert_sql = f"INSERT INTO {table_name} ({col_names}) VALUES %s"
-    log.debug(f"Batch {batch_id}: INSERT SQL: {insert_sql}")
-    data = [tuple(row) for row in pdf.values]
-    log.debug(f"Batch {batch_id}: Prepared {len(data)} rows for insertion.")
+    """
+    Process a batch from the Kafka stream by converting to Pandas and bulk inserting into PostgreSQL.
+    Expects that the first record in the batch contains a 'filename' field to derive the table name.
+    """
     try:
-        conn = get_postgres_connection()
-        cur = conn.cursor()
-        psycopg2.extras.execute_values(cur, insert_sql, data, page_size=1000)
-        conn.commit()
-        cur.close()
-        conn.close()
-        log.info(f"Batch {batch_id} inserted into table '{table_name}'")
+        pdf = batch_df.toPandas()
+        log.debug(f"Batch {batch_id}: Converted Spark DataFrame to Pandas with shape {pdf.shape}")
+        if pdf.empty:
+            log.info(f"Batch {batch_id} is empty. Skipping insertion.")
+            return
+
+        # Derive table name from the first record and drop the 'filename' column for insertion
+        table_name = pdf.iloc[0]['filename']
+        log.debug(f"Batch {batch_id}: Target table derived as '{table_name}'.")
+        bulk_insert_dataframe(pdf, table_name, drop_columns=['filename'], context=f"Batch {batch_id}: ")
     except Exception as e:
         log.error(f"Error writing batch {batch_id} to PostgreSQL: {e}")
 
 
 def create_topic_if_not_exists():
+    """
+    Create the Kafka topic if it does not already exist.
+    """
     from confluent_kafka.admin import AdminClient, NewTopic
 
     admin_client = AdminClient({'bootstrap.servers': KAFKA_BOOTSTRAP_SERVERS})
-
-    # Retrieve current topics metadata from the broker
     metadata = admin_client.list_topics(timeout=10)
     if KAFKA_TOPIC in metadata.topics:
         log.debug(f"Topic '{KAFKA_TOPIC}' already exists.")
         return True
     else:
-        # Define the new topic with the desired configuration
         new_topic = NewTopic(KAFKA_TOPIC, num_partitions=1, replication_factor=1)
-        # Create the topic
         fs = admin_client.create_topics([new_topic])
         for topic_name, future in fs.items():
             try:
-                # Block until the topic creation is complete (or an exception is raised)
                 future.result(timeout=10)
                 log.debug(f"Topic '{topic_name}' created successfully.")
             except Exception as e:
@@ -81,6 +60,10 @@ def create_topic_if_not_exists():
 
 
 def process_kafka_stream():
+    """
+    Initialize a Spark session to read streaming data from Kafka,
+    parse the JSON messages, and write the resulting DataFrame either to PostgreSQL or to Parquet.
+    """
     global spark, query
     existing = SparkSession.getActiveSession()
     if existing is not None:
@@ -106,6 +89,7 @@ def process_kafka_stream():
     json_df = kafka_df.selectExpr("CAST(value AS STRING) as json_str")
     log.debug("Converted Kafka binary values to strings.")
 
+    # Infer schema from a sample CSV file
     sample_files = glob.glob(DATA_DIRECTORY + "/*.csv")
     if sample_files:
         sample_file = sample_files[0]
