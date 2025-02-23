@@ -25,12 +25,10 @@ def main():
                         help="Processing mode: 'stream' for real-time or 'batch' for periodic processing")
     args = parser.parse_args()
 
-    # Always perform the initial bulk ingestion first, regardless of processing mode.
     log.info("Running initial setup for the data lake (bulk ingestion)...")
     initial_setup_data_lake()
 
     if args.mode == "stream":
-        # Start both file watcher and Kafka consumer in parallel threads.
         watcher_thread = threading.Thread(target=run_file_watcher, daemon=True)
         consumer_thread = threading.Thread(target=run_kafka_consumer, daemon=True)
 
@@ -41,7 +39,6 @@ def main():
         watcher_thread.join()
         consumer_thread.join()
     else:
-        # For batch processing mode, process all CSV files.
         from file_scanner import scan_filesystem
         from data_lake import create_data_lake_entry
         csv_files, _ = scan_filesystem(DATA_DIRECTORY)

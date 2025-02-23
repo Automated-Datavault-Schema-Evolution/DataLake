@@ -1,4 +1,4 @@
-# file_watcher.py (modified)
+# file_watcher.py
 import os
 import time
 
@@ -15,9 +15,10 @@ class CSVEventHandler(FileSystemEventHandler):
         if not event.is_directory and event.src_path.endswith(".csv"):
             log.info(f"Detected change in {event.src_path}")
             if os.path.exists(event.src_path):
+                log.debug(f"File {event.src_path} exists. Processing...")
                 # Stream data to Kafka
                 stream_delta(event.src_path)
-                # Also process the file into the data lake (i.e. load into PostgreSQL or save as Parquet)
+                # Also ingest file into data lake (RDBMS or Parquet)
                 create_data_lake_entry(event.src_path)
             else:
                 log.error(f"File not found: {event.src_path}")
@@ -27,6 +28,7 @@ def start_file_watcher(directory):
     if not os.path.exists(directory):
         log.error(f"Directory does not exist: {directory}")
         exit(1)
+    log.debug(f"Starting file watcher on directory: {directory}")
     event_handler = CSVEventHandler()
     observer = Observer()
     observer.schedule(event_handler, directory, recursive=False)

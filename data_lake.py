@@ -11,6 +11,7 @@ from config import LAKE_TYPE, DATA_DIRECTORY, POSTGRES_HOST, POSTGRES_PORT, POST
 
 # Initialize Spark session
 spark = SparkSession.builder.appName("DataLakeIngestion").getOrCreate()
+log.debug("Initialized Spark session for DataLakeIngestion.")
 
 
 def get_postgres_connection():
@@ -25,6 +26,7 @@ def get_postgres_connection():
             user=POSTGRES_USER,
             password=POSTGRES_PASSWORD
         )
+        log.debug(f"Connected to PostgreSQL at {POSTGRES_HOST}:{POSTGRES_PORT}/{POSTGRES_DB}")
         return conn
     except Exception as e:
         log.error(f"Error connecting to PostgreSQL: {e}")
@@ -42,6 +44,7 @@ def table_exists(table_name):
         result = cur.fetchone()
         cur.close()
         conn.close()
+        log.debug(f"Checked existence for table '{table_name}': {result[0]}")
         return result[0] is not None
     except Exception as e:
         log.error(f"Error checking existence of table '{table_name}': {e}")
@@ -55,7 +58,7 @@ def create_table_if_not_exists(table_name, pdf):
     """
     col_defs = []
     add_insertion = "insertion_timestamp" not in pdf.columns
-
+    log.debug(f"Creating table '{table_name}', insertion_timestamp added: {add_insertion}")
     for col, dtype in pdf.dtypes.items():
         dtype_str = str(dtype)
         if "int" in dtype_str:
@@ -71,6 +74,7 @@ def create_table_if_not_exists(table_name, pdf):
         col_defs.append('"insertion_timestamp" TIMESTAMP')
     col_defs_str = ", ".join(col_defs)
     create_sql = f"CREATE TABLE IF NOT EXISTS {table_name} ({col_defs_str});"
+    log.debug(f"CREATE TABLE SQL for '{table_name}': {create_sql}")
     try:
         conn = get_postgres_connection()
         cur = conn.cursor()
@@ -96,6 +100,7 @@ def store_to_rdbms(table_name, df):
     try:
         # Convert Spark DataFrame to Pandas DataFrame.
         pdf = df.toPandas()
+        log.debug(f"Converted Spark DataFrame to Pandas for table '{table_name}', shape: {pdf.shape}")
         if pdf.empty:
             log.info(f"No data to insert for table {table_name}")
             return
@@ -104,6 +109,7 @@ def store_to_rdbms(table_name, df):
         if "insertion_timestamp" not in pdf.columns:
             from datetime import datetime
             pdf["insertion_timestamp"] = datetime.now()
+            log.debug("Added insertion_timestamp column to Pandas DataFrame.")
 
         # Check if table exists; if not, create it.
         if not table_exists(table_name):
@@ -112,17 +118,18 @@ def store_to_rdbms(table_name, df):
         else:
             log.info(f"Table '{table_name}' exists. Appending data.")
 
-        # Build the INSERT statement dynamically based on the DataFrame columns.
+        # Build the INSERT statement dynamically based on DataFrame columns.
         columns = list(pdf.columns)
         col_names = ", ".join([f'"{col}"' for col in columns])
         insert_sql = f"INSERT INTO {table_name} ({col_names}) VALUES %s"
+        log.debug(f"INSERT SQL for '{table_name}': {insert_sql}")
 
         # Convert DataFrame rows to a list of tuples.
         data = [tuple(row) for row in pdf.values]
+        log.debug(f"Prepared {len(data)} rows for insertion into '{table_name}'.")
 
         conn = get_postgres_connection()
         cur = conn.cursor()
-        # Use execute_values for an optimized bulk insert.
         psycopg2.extras.execute_values(cur, insert_sql, data, page_size=1000)
         conn.commit()
         cur.close()
@@ -148,6 +155,7 @@ def create_data_lake_entry(file_name):
     if "insertion_timestamp" not in df.columns:
         from pyspark.sql.functions import current_timestamp
         df = df.withColumn("insertion_timestamp", current_timestamp())
+        log.debug(f"Added insertion_timestamp column to DataFrame from file {file_name}.")
 
     if LAKE_TYPE == "parquet":
         dest_dir = "./datalake/parquet"
@@ -178,6 +186,7 @@ def initial_setup_data_lake():
     if LAKE_TYPE == "rdbms":
         for file in csv_files:
             table_name = os.path.basename(file).replace(".csv", "")
+            log.debug(f"Processing file '{file}' for table '{table_name}'.")
             if table_exists(table_name):
                 log.info(f"Table '{table_name}' already exists. Skipping bulk insert for this file.")
             else:

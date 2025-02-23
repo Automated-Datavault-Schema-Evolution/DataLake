@@ -10,6 +10,7 @@ def scan_filesystem(directory, pattern="*.csv"):
     """
     Scan a directory for CSV files and extract basic metadata.
     """
+    log.debug(f"Scanning directory '{directory}' for files matching pattern '{pattern}'")
     csv_files = glob.glob(os.path.join(directory, pattern))
     metadata = {}
     for file in csv_files:
@@ -19,9 +20,10 @@ def scan_filesystem(directory, pattern="*.csv"):
                 "columns": list(df_sample.columns),
                 "dtypes": df_sample.dtypes.astype(str).to_dict()
             }
-            log.info(f"Scanned file: {file}")
+            log.info(f"Scanned file: {file} with columns: {metadata[file]['columns']}")
         except Exception as e:
             log.error(f"Error reading {file}: {e}")
+    log.debug(f"Completed scanning. Found {len(csv_files)} files.")
     return csv_files, metadata
 
 
