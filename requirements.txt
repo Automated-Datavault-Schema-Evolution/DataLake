@@ -2,6 +2,7 @@ pandas
 pyarrow
 watchdog
 kafka-python
+confluent_kafka
 python-dotenv
 psycopg2-binary
 pyspark
