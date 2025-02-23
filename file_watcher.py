@@ -16,9 +16,7 @@ class CSVEventHandler(FileSystemEventHandler):
             log.info(f"Detected change in {event.src_path}")
             if os.path.exists(event.src_path):
                 log.debug(f"File {event.src_path} exists. Processing...")
-                # Stream data to Kafka
                 stream_delta(event.src_path)
-                # Also ingest file into data lake (RDBMS or Parquet)
                 create_data_lake_entry(event.src_path)
             else:
                 log.error(f"File not found: {event.src_path}")

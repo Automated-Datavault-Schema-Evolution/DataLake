@@ -4,6 +4,7 @@ import os
 import psycopg2
 import psycopg2.extras
 from logger import log
+from psycopg2.pool import SimpleConnectionPool
 from pyspark.sql import SparkSession
 
 from config import LAKE_TYPE, DATA_DIRECTORY, POSTGRES_HOST, POSTGRES_PORT, POSTGRES_DB, POSTGRES_USER, \
@@ -13,24 +14,57 @@ from config import LAKE_TYPE, DATA_DIRECTORY, POSTGRES_HOST, POSTGRES_PORT, POST
 spark = SparkSession.builder.appName("DataLakeIngestion").getOrCreate()
 log.debug("Initialized Spark session for DataLakeIngestion.")
 
+# Global connection pool variable
+PG_POOL = None
+
+
+def init_postgres_pool(minconn=1, maxconn=5):
+    """
+    Initialize and return a global psycopg2 connection pool.
+    This pool will be used by all threads.
+    """
+    global PG_POOL
+    if PG_POOL is None:
+        try:
+            PG_POOL = SimpleConnectionPool(
+                minconn,
+                maxconn,
+                host=POSTGRES_HOST,
+                port=POSTGRES_PORT,
+                dbname=POSTGRES_DB,
+                user=POSTGRES_USER,
+                password=POSTGRES_PASSWORD
+            )
+            log.info(f"PostgreSQL connection pool created (min={minconn}, max={maxconn}).")
+        except Exception as e:
+            log.error(f"Error establishing PostgreSQL connection pool: {e}")
+            raise
+    else:
+        log.debug("Reusing existing PostgreSQL connection pool.")
+    return PG_POOL
+
 
 def get_postgres_connection():
     """
-    Create and return a psycopg2 connection using the PostgreSQL parameters.
+    Get a connection from the pool.
     """
+    pool = init_postgres_pool()
     try:
-        conn = psycopg2.connect(
-            host=POSTGRES_HOST,
-            port=POSTGRES_PORT,
-            dbname=POSTGRES_DB,
-            user=POSTGRES_USER,
-            password=POSTGRES_PASSWORD
-        )
-        log.debug(f"Connected to PostgreSQL at {POSTGRES_HOST}:{POSTGRES_PORT}/{POSTGRES_DB}")
+        conn = pool.getconn()
+        log.debug("Acquired connection from pool.")
         return conn
     except Exception as e:
-        log.error(f"Error connecting to PostgreSQL: {e}")
+        log.error(f"Error getting connection from pool: {e}")
         raise
+
+
+def release_postgres_connection(conn):
+    """
+    Return the connection back to the pool.
+    """
+    pool = init_postgres_pool()
+    pool.putconn(conn)
+    log.debug("Released connection back to pool.")
 
 
 def table_exists(table_name):
@@ -43,7 +77,7 @@ def table_exists(table_name):
         cur.execute("SELECT to_regclass(%s)", (f"public.{table_name}",))
         result = cur.fetchone()
         cur.close()
-        conn.close()
+        release_postgres_connection(conn)
         log.debug(f"Checked existence for table '{table_name}': {result[0]}")
         return result[0] is not None
     except Exception as e:
@@ -54,7 +88,7 @@ def table_exists(table_name):
 def create_table_if_not_exists(table_name, pdf):
     """
     Generate and execute a CREATE TABLE statement based on the Pandas DataFrame schema.
-    An extra column 'insertion_timestamp' is added if it is not already present.
+    Adds an extra column 'insertion_timestamp' if not already present.
     """
     col_defs = []
     add_insertion = "insertion_timestamp" not in pdf.columns
@@ -81,7 +115,7 @@ def create_table_if_not_exists(table_name, pdf):
         cur.execute(create_sql)
         conn.commit()
         cur.close()
-        conn.close()
+        release_postgres_connection(conn)
         log.info(f"Created table '{table_name}' with schema: {col_defs_str}")
     except Exception as e:
         log.error(f"Error creating table '{table_name}': {e}")
@@ -98,33 +132,28 @@ def store_to_parquet(dest_path, df):
 
 def store_to_rdbms(table_name, df):
     try:
-        # Convert Spark DataFrame to Pandas DataFrame.
         pdf = df.toPandas()
         log.debug(f"Converted Spark DataFrame to Pandas for table '{table_name}', shape: {pdf.shape}")
         if pdf.empty:
             log.info(f"No data to insert for table {table_name}")
             return
 
-        # Ensure insertion_timestamp column is present.
         if "insertion_timestamp" not in pdf.columns:
             from datetime import datetime
             pdf["insertion_timestamp"] = datetime.now()
-            log.debug("Added insertion_timestamp column to Pandas DataFrame.")
+            log.debug(f"Added insertion_timestamp column to Pandas DataFrame for table '{table_name}'.")
 
-        # Check if table exists; if not, create it.
         if not table_exists(table_name):
             log.info(f"Table '{table_name}' does not exist. Creating table.")
             create_table_if_not_exists(table_name, pdf)
         else:
             log.info(f"Table '{table_name}' exists. Appending data.")
 
-        # Build the INSERT statement dynamically based on DataFrame columns.
         columns = list(pdf.columns)
         col_names = ", ".join([f'"{col}"' for col in columns])
         insert_sql = f"INSERT INTO {table_name} ({col_names}) VALUES %s"
         log.debug(f"INSERT SQL for '{table_name}': {insert_sql}")
 
-        # Convert DataFrame rows to a list of tuples.
         data = [tuple(row) for row in pdf.values]
         log.debug(f"Prepared {len(data)} rows for insertion into '{table_name}'.")
 
@@ -133,7 +162,7 @@ def store_to_rdbms(table_name, df):
         psycopg2.extras.execute_values(cur, insert_sql, data, page_size=1000)
         conn.commit()
         cur.close()
-        conn.close()
+        release_postgres_connection(conn)
         log.info(f"Optimized bulk insert: Saved data to table '{table_name}' in PostgreSQL")
     except Exception as e:
         log.error(f"Error saving to PostgreSQL: {e}")
@@ -151,7 +180,6 @@ def create_data_lake_entry(file_name):
         log.error(f"Error reading CSV file {file_name}: {e}")
         return
 
-    # Add an insertion timestamp if not already present.
     if "insertion_timestamp" not in df.columns:
         from pyspark.sql.functions import current_timestamp
         df = df.withColumn("insertion_timestamp", current_timestamp())
@@ -177,8 +205,8 @@ def initial_setup_data_lake():
     For Parquet: If the target Parquet directory is empty or missing, ingest all CSV files.
     """
     import glob
-
     csv_files = glob.glob(os.path.join(DATA_DIRECTORY, "*.csv"))
+    log.debug(f"Found {len(csv_files)} CSV files in {DATA_DIRECTORY}.")
     if not csv_files:
         log.info("No CSV files found in the data directory.")
         return
@@ -207,3 +235,7 @@ def initial_setup_data_lake():
 
 if __name__ == "__main__":
     initial_setup_data_lake()
+    # Optionally, you might want to close the connection pool here:
+    if PG_POOL is not None:
+        PG_POOL.closeall()
+        log.debug("Closed all connections in the PostgreSQL pool.")
