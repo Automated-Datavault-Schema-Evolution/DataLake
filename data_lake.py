@@ -2,9 +2,9 @@
 import os
 
 import psycopg2
+import psycopg2.extras
 from logger import log
 from pyspark.sql import SparkSession
-from pyspark.sql.functions import current_timestamp
 
 from config import LAKE_TYPE, DATA_DIRECTORY, POSTGRES_HOST, POSTGRES_PORT, POSTGRES_DB, POSTGRES_USER, \
     POSTGRES_PASSWORD
@@ -51,11 +51,12 @@ def table_exists(table_name):
 def create_table_if_not_exists(table_name, pdf):
     """
     Generate and execute a CREATE TABLE statement based on the Pandas DataFrame schema.
-    An extra column 'insertion_timestamp' is added.
+    An extra column 'insertion_timestamp' is added if it is not already present.
     """
     col_defs = []
+    add_insertion = "insertion_timestamp" not in pdf.columns
+
     for col, dtype in pdf.dtypes.items():
-        # Map common pandas types to PostgreSQL data types.
         dtype_str = str(dtype)
         if "int" in dtype_str:
             pg_type = "BIGINT"
@@ -66,8 +67,8 @@ def create_table_if_not_exists(table_name, pdf):
         else:
             pg_type = "TEXT"
         col_defs.append(f'"{col}" {pg_type}')
-    # Add the insertion_timestamp column
-    col_defs.append('"insertion_timestamp" TIMESTAMP')
+    if add_insertion:
+        col_defs.append('"insertion_timestamp" TIMESTAMP')
     col_defs_str = ", ".join(col_defs)
     create_sql = f"CREATE TABLE IF NOT EXISTS {table_name} ({col_defs_str});"
     try:
@@ -99,6 +100,11 @@ def store_to_rdbms(table_name, df):
             log.info(f"No data to insert for table {table_name}")
             return
 
+        # Ensure insertion_timestamp column is present.
+        if "insertion_timestamp" not in pdf.columns:
+            from datetime import datetime
+            pdf["insertion_timestamp"] = datetime.now()
+
         # Check if table exists; if not, create it.
         if not table_exists(table_name):
             log.info(f"Table '{table_name}' does not exist. Creating table.")
@@ -106,27 +112,22 @@ def store_to_rdbms(table_name, df):
         else:
             log.info(f"Table '{table_name}' exists. Appending data.")
 
-        # Add the insertion timestamp column to the DataFrame.
-        if 'insertion_timestamp' not in pdf.columns:
-            from datetime import datetime
-            pdf["insertion_timestamp"] = datetime.now()
-
-        # Build an INSERT statement dynamically based on DataFrame columns.
+        # Build the INSERT statement dynamically based on the DataFrame columns.
         columns = list(pdf.columns)
         col_names = ", ".join([f'"{col}"' for col in columns])
-        placeholders = ", ".join(["%s"] * len(columns))
-        insert_sql = f"INSERT INTO {table_name} ({col_names}) VALUES ({placeholders})"
+        insert_sql = f"INSERT INTO {table_name} ({col_names}) VALUES %s"
 
         # Convert DataFrame rows to a list of tuples.
         data = [tuple(row) for row in pdf.values]
 
         conn = get_postgres_connection()
         cur = conn.cursor()
-        cur.executemany(insert_sql, data)
+        # Use execute_values for an optimized bulk insert.
+        psycopg2.extras.execute_values(cur, insert_sql, data, page_size=1000)
         conn.commit()
         cur.close()
         conn.close()
-        log.info(f"Saved data to table '{table_name}' in PostgreSQL")
+        log.info(f"Optimized bulk insert: Saved data to table '{table_name}' in PostgreSQL")
     except Exception as e:
         log.error(f"Error saving to PostgreSQL: {e}")
 
@@ -143,8 +144,10 @@ def create_data_lake_entry(file_name):
         log.error(f"Error reading CSV file {file_name}: {e}")
         return
 
-    # Add an insertion timestamp to each record (using Spark's current_timestamp).
-    df = df.withColumn("insertion_timestamp", current_timestamp())
+    # Add an insertion timestamp if not already present.
+    if "insertion_timestamp" not in df.columns:
+        from pyspark.sql.functions import current_timestamp
+        df = df.withColumn("insertion_timestamp", current_timestamp())
 
     if LAKE_TYPE == "parquet":
         dest_dir = "./datalake/parquet"
@@ -162,10 +165,8 @@ def create_data_lake_entry(file_name):
 def initial_setup_data_lake():
     """
     Perform an initial bulk ingestion of the entire DATA_DIRECTORY into the data lake.
-    For RDBMS:
-      - For each CSV file in the directory, if the corresponding table does not exist, ingest it.
-    For Parquet:
-      - If the target Parquet directory is empty or missing, ingest all CSV files.
+    For RDBMS: For each CSV file, if the corresponding table does not exist, ingest it.
+    For Parquet: If the target Parquet directory is empty or missing, ingest all CSV files.
     """
     import glob
 
