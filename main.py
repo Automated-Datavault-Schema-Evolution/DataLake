@@ -1,23 +1,33 @@
 import argparse
 import threading
+
 from logger import log
+
 from config import DATA_DIRECTORY, PROCESSING_MODE
-from file_watcher import start_file_watcher
-from kafka_consumer import process_kafka_stream
+from data_lake import initial_setup_data_lake
+
 
 def run_file_watcher():
+    from file_watcher import start_file_watcher
     log.info("Starting file watcher...")
     start_file_watcher(DATA_DIRECTORY)
 
+
 def run_kafka_consumer():
+    from kafka_consumer import process_kafka_stream
     log.info("Starting Kafka consumer (PySpark streaming)...")
     process_kafka_stream()
+
 
 def main():
     parser = argparse.ArgumentParser(description="Data Lake and Streaming Application")
     parser.add_argument("--mode", choices=["stream", "batch"], default=PROCESSING_MODE,
-                        help="Processing mode: 'stream' for real-time or 'batch' for batch processing")
+                        help="Processing mode: 'stream' for real-time or 'batch' for periodic processing")
     args = parser.parse_args()
+
+    # Always perform the initial bulk ingestion first, regardless of processing mode.
+    log.info("Running initial setup for the data lake (bulk ingestion)...")
+    initial_setup_data_lake()
 
     if args.mode == "stream":
         # Start both file watcher and Kafka consumer in parallel threads.
@@ -31,12 +41,13 @@ def main():
         watcher_thread.join()
         consumer_thread.join()
     else:
-        # For batch processing mode, you could invoke batch processing (not covered here).
+        # For batch processing mode, process all CSV files.
         from file_scanner import scan_filesystem
         from data_lake import create_data_lake_entry
         csv_files, _ = scan_filesystem(DATA_DIRECTORY)
         for file in csv_files:
             create_data_lake_entry(file)
+
 
 if __name__ == "__main__":
     main()

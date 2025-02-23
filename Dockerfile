@@ -2,12 +2,12 @@
 FROM python:3.9-slim
 
 # Install Tini
-ENV TINI_VERSION v0.19.0
-ADD https://github.com/krallin/tini/releases/download/${TINI_VERSION}/tini /tini
-RUN chmod +x /tini
+# ENV TINI_VERSION v0.19.0
+# ADD https://github.com/krallin/tini/releases/download/${TINI_VERSION}/tini /tini
+# RUN chmod +x /tini
 
 # Set Tini as the entrypoint
-ENTRYPOINT ["/tini", "--"]
+# ENTRYPOINT ["/tini", "--"]
 
 # Prevent Python buffering and set working directory
 ENV PYTHONUNBUFFERED=1

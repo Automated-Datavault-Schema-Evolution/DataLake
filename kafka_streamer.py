@@ -3,15 +3,16 @@ import json
 import os
 
 import pandas as pd
-import logging
 from kafka import KafkaProducer
-from config import KAFKA_BOOTSTRAP_SERVERS, KAFKA_TOPIC
 from logger import log
+
+from config import KAFKA_BOOTSTRAP_SERVERS, KAFKA_TOPIC
 
 producer = KafkaProducer(
     bootstrap_servers=KAFKA_BOOTSTRAP_SERVERS,
     value_serializer=lambda v: json.dumps(v).encode('utf-8')
 )
+
 
 def stream_delta(file_path):
     """
@@ -29,6 +30,7 @@ def stream_delta(file_path):
         log.info(f"Streamed data from {file_path} to Kafka topic '{KAFKA_TOPIC}'")
     except Exception as e:
         log.error(f"Error streaming data from {file_path}: {e}")
+
 
 if __name__ == "__main__":
     stream_delta("sample.csv")

@@ -7,7 +7,7 @@ from pyspark.sql import SparkSession
 from pyspark.sql.functions import from_json, explode, col
 from pyspark.sql.types import StructType, StructField, StringType, ArrayType
 
-from config import KAFKA_BOOTSTRAP_SERVERS, KAFKA_TOPIC, LAKE_TYPE, SQLALCHEMY_DATABASE_URI, DATA_DIRECTORY
+from config import KAFKA_BOOTSTRAP_SERVERS, KAFKA_TOPIC, LAKE_TYPE, DATA_DIRECTORY
 
 # Global variables to hold Spark session and streaming query
 spark = None
@@ -16,7 +16,6 @@ query = None
 
 def process_kafka_stream():
     global spark, query
-
     # Ensure no active session exists.
     existing = SparkSession.getActiveSession()
     if existing is not None:
@@ -24,9 +23,9 @@ def process_kafka_stream():
     # Create a new Spark session with the required packages.
     spark = SparkSession.builder \
         .master("local[*]") \
-        .appName("KafkaConsumerToDataLake") \
         .config("spark.jars.packages",
-                "org.apache.spark:spark-sql-kafka-0-10_2.12:3.3.2,org.postgresql:postgresql:42.5.0") \
+                "org.apache.spark:spark-sql-kafka-0-10_2.13:3.5.4,org.postgresql:postgresql:42.5.0") \
+        .appName("KafkaConsumerToDataLake") \
         .getOrCreate()
     spark.sparkContext.setLogLevel("WARN")
 
@@ -34,9 +33,9 @@ def process_kafka_stream():
     kafka_df = spark.readStream.format("kafka") \
         .option("kafka.bootstrap.servers", ",".join(KAFKA_BOOTSTRAP_SERVERS)) \
         .option("subscribe", KAFKA_TOPIC) \
-        .option("startingOffsets", "latest") \
+        .option("includeHeaders", "true") \
         .load()
-
+    # .option("startingOffsets", "latest") \
     # Convert binary Kafka 'value' column to string.
     json_df = kafka_df.selectExpr("CAST(value AS STRING) as json_str")
 

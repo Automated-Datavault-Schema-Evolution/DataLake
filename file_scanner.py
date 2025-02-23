@@ -1,8 +1,10 @@
 # file_scanner.py
-import os
 import glob
+import os
+
 import pandas as pd
 from logger import log
+
 
 def scan_filesystem(directory, pattern="*.csv"):
     """
@@ -21,6 +23,7 @@ def scan_filesystem(directory, pattern="*.csv"):
         except Exception as e:
             log.error(f"Error reading {file}: {e}")
     return csv_files, metadata
+
 
 if __name__ == "__main__":
     files, meta = scan_filesystem("./data")
