@@ -11,9 +11,6 @@ from pyspark.sql.types import StructType, StructField, StringType, ArrayType
 from config import KAFKA_BOOTSTRAP_SERVERS, KAFKA_TOPIC, LAKE_TYPE, DATA_DIRECTORY
 from data_lake import bulk_insert_dataframe
 
-spark = None
-query = None
-
 
 def write_to_postgres(batch_df, batch_id):
     """
@@ -42,12 +39,13 @@ def create_topic_if_not_exists():
     from confluent_kafka.admin import AdminClient, NewTopic
 
     admin_client = AdminClient({'bootstrap.servers': KAFKA_BOOTSTRAP_SERVERS})
+    # admin_client = AdminClient({'bootstrap.servers': '0.0.0.0:9092' })
     metadata = admin_client.list_topics(timeout=10)
     if KAFKA_TOPIC in metadata.topics:
         log.debug(f"Topic '{KAFKA_TOPIC}' already exists.")
         return True
     else:
-        new_topic = NewTopic(KAFKA_TOPIC, num_partitions=1, replication_factor=1)
+        new_topic = NewTopic(KAFKA_TOPIC, num_partitions=3, replication_factor=1)
         fs = admin_client.create_topics([new_topic])
         for topic_name, future in fs.items():
             try:
@@ -64,11 +62,6 @@ def process_kafka_stream():
     Initialize a Spark session to read streaming data from Kafka,
     parse the JSON messages, and write the resulting DataFrame either to PostgreSQL or to Parquet.
     """
-    global spark, query
-    existing = SparkSession.getActiveSession()
-    if existing is not None:
-        log.debug("Stopping existing Spark session.")
-        existing.stop()
     spark = SparkSession.builder \
         .appName("KafkaConsumerToDataLake") \
         .config("spark.jars.packages", "org.apache.spark:spark-sql-kafka-0-10_2.13:3.5.4") \
@@ -78,7 +71,7 @@ def process_kafka_stream():
     spark.conf.set("spark.sql.debug.maxToStringFields", 1000)
     log.debug("Created new Spark session with Kafka support.")
 
-    create_topic_if_not_exists()
+    # create_topic_if_not_exists()
 
     log.debug(f"Reading from Kafka topic '{KAFKA_TOPIC}' with bootstrap servers {KAFKA_BOOTSTRAP_SERVERS}")
     kafka_df = spark.readStream.format("kafka") \
