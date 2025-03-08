@@ -6,4 +6,5 @@ confluent_kafka
 python-dotenv
 psycopg2-binary
 pyspark
-git+ssh://git@github.com/Automated-Datavault-Schema-Evolution/MyLogger.git@v0.2.0#egg=mylogger
+lz4
+git+ssh://git@github.com/Automated-Datavault-Schema-Evolution/MyLogger.git@v0.2.1#egg=mylogger
