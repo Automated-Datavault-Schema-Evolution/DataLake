@@ -1,0 +1,35 @@
+@startuml
+node "File System" {
+  artifact "Baseline Directory" as baseline
+}
+node "Processing Server" {
+  artifact "Filewatcher" as filewatcher
+  artifact "Kafka Consumer / PySpark" as consumer
+  artifact "Datalake Handler" as datalake
+}
+node "Kafka Cluster" {
+  artifact "Kafka Service" as kafka
+}
+node "Storage Server" {
+  artifact "Postgres/Parquet Storage" as storage
+  artifact "Data Vault" as dataVault
+}
+node "Presentation Server" {
+  artifact "Presentation Layer" as presentation
+}
+
+baseline --> filewatcher : Monitors CSV changes
+filewatcher --> kafka : Sends change notifications
+kafka --> consumer : Streams data
+consumer --> datalake : Processes and sends dataframe
+
+note right of datalake
+  Configurable:
+  - Real-time streaming & updates
+  - Batch changes (using Kafka streaming)
+end note
+
+datalake --> storage : Stores data (per configuration)
+storage --> dataVault : Ingests data (combined raw/business vault)
+dataVault --> presentation : Provides star schema view
+@enduml

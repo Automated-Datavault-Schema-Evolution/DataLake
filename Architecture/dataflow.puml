@@ -1,0 +1,33 @@
+@startuml
+!define DFD
+skinparam rectangle {
+  BackgroundColor<<Process>> LightBlue
+  BackgroundColor<<DataStore>> LightYellow
+  BackgroundColor<<DataSource>> LightGreen
+  BorderColor Black
+}
+
+rectangle "CSV Files (Baseline Directory)" <<DataSource>> as CSV
+rectangle "Filewatcher" <<Process>> as FW
+rectangle "Kafka Service" <<Process>> as Kafka
+rectangle "PySpark Consumer" <<Process>> as Consumer
+rectangle "Datalake Handler" <<Process>> as DL
+rectangle "Postgres/Parquet Storage" <<DataStore>> as Storage
+rectangle "Data Vault" <<DataStore>> as Vault
+rectangle "Presentation Layer" <<Process>> as Presentation
+
+CSV --> FW : Detect changes
+FW --> Kafka : Notify changes
+Kafka --> Consumer : Stream data
+Consumer --> DL : Convert to dataframe
+
+note right of DL
+  Configuration:
+  - Real-time updates on datalake
+  - Batch changes (via Kafka streaming)
+end note
+
+DL --> Storage : Store data (config dependent)
+Storage --> Vault : Ingest data (combined raw & business vault)
+Vault --> Presentation : Provide star schema view
+@enduml

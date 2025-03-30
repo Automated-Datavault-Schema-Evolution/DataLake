@@ -1,0 +1,37 @@
+@startuml
+package "Data Ingestion" {
+  [Baseline Directory] <<Directory>>
+  [Filewatcher] <<Component>>
+  [Kafka Service] <<Component>>
+}
+
+package "Data Processing" {
+  [Kafka Consumer / PySpark] <<Component>>
+  [Datalake Handler] <<Component>>
+}
+
+package "Data Storage" {
+  [Postgres/Parquet Storage] <<DataStore>>
+  [Data Vault] <<Component>>
+}
+
+package "Presentation" {
+  [Presentation Layer] <<Component>>
+}
+
+' Show interactions between components
+[Baseline Directory] --> [Filewatcher] : Monitors for CSV changes
+[Filewatcher] --> [Kafka Service] : Sends file change events
+[Kafka Service] --> [Kafka Consumer / PySpark] : Streams changed data
+[Kafka Consumer / PySpark] --> [Datalake Handler] : Sends dataframe
+
+note right of [Datalake Handler]
+  Configuration Options:
+  - Real-time streaming & updates
+  - Batch-changes (using Kafka streaming)
+end note
+
+[Datalake Handler] --> [Postgres/Parquet Storage] : Stores data based on config
+[Postgres/Parquet Storage] --> [Data Vault] : Ingests data
+[Data Vault] --> [Presentation Layer] : Provides star schema view (raw & business)
+@enduml
