@@ -12,7 +12,7 @@ package "Data Processing" {
 }
 
 package "Data Storage" {
-  [Postgres/Parquet Storage] <<DataStore>>
+  [Datalake] <<DataStore>>
   [Data Vault] <<Component>>
 }
 
@@ -20,8 +20,13 @@ package "Presentation" {
   [Presentation Layer] <<Component>>
 }
 
-package "ETL Framework" {
+package "Framework" {
   [Schema Evolution Framework] <<Component>>
+}
+
+package "Data Vault" {
+    [Raw Vault] <<Component>>
+    [Business Vault] <<Component>>
 }
 
 ' Show interactions between components
@@ -30,19 +35,26 @@ package "ETL Framework" {
 [Kafka Service] --> [Kafka Consumer / PySpark] : Streams changed data
 [Kafka Consumer / PySpark] --> [Datalake Handler] : Sends dataframe
 
-note right of [Datalake Handler]
+note left of [Datalake Handler]
   Configuration Options:
   - Real-time streaming & updates
   - Batch-changes (using Kafka streaming)
 end note
 
-[Datalake Handler] --> [Postgres/Parquet Storage] : Stores data based on config
-[Postgres/Parquet Storage] --> [Data Vault] : Ingests data
+note left of [Datalake]
+    Configuration Options:
+    - Parquet Files
+    - RDBMS (PostgresDB)
+end note
+
+
+[Datalake Handler] --> [Datalake] : Stores data based on config
+[Datalake] --> [Data Vault] : Ingests data
 [Data Vault] --> [Presentation Layer] : Provides star schema view (raw & business)
 
-' Integration of ETL Framework
-[Filewatcher] --> [ETL Framework] : Notifies schema evolution
-[ETL Framework] --> [Datalake Handler] : Adapts data lake schema
-[ETL Framework] --> [Data Vault] : Adapts vault schema
-[ETL Framework] --> [Presentation Layer] : Updates presentation objects
+' Integration of Schema Evolution Framework
+[Filewatcher] --> [Framework] : Notifies schema evolution
+[Framework] --> [Datalake Handler] : Adapts data lake schema
+[Framework] --> [Data Vault] : Adapts vault schema
+[Framework] --> [Presentation Layer] : Updates presentation objects
 @enduml

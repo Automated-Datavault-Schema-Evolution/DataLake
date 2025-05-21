@@ -18,7 +18,7 @@ node "Presentation Server" {
   artifact "Presentation Layer" as presentation
 }
 node "ETL Server" {
-  artifact "ETL Framework" as etlFramework
+  artifact "Schema Evolution Framework" as SchemaEvolutionFramework
 }
 
 baseline --> filewatcher : Monitors CSV changes
@@ -36,9 +36,9 @@ datalake --> storage : Stores data (per configuration)
 storage --> dataVault : Ingests data (combined raw/business vault)
 dataVault --> presentation : Provides star schema view
 
-' ETL Framework integration in deployment
-filewatcher --> etlFramework : Notifies schema evolution
-etlFramework --> datalake : Adapts data lake schema
-etlFramework --> dataVault : Adapts vault schema
-etlFramework --> presentation : Updates presentation layer schema
+' Schema Evolution Framework integration in deployment
+filewatcher --> SchemaEvolutionFramework : Notifies schema evolution
+SchemaEvolutionFramework --> datalake : Adapts data lake schema
+SchemaEvolutionFramework --> dataVault : Adapts vault schema
+SchemaEvolutionFramework --> presentation : Updates presentation layer schema
 @enduml
