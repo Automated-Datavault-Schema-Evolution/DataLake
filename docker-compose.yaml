@@ -12,12 +12,12 @@ services:
       # - ${BULK_OFFSET_FILE}:/app/last_ingest_offset.pkl
       - ${CHECKPOINT_PATH}:/tmp/delta/checkpoints
     networks:
-      - datanet
+      - data_automation-net
     environment:
       - SSH_AUTH_SOCK=/ssh-agent
     restart: unless-stopped
 
 
 networks:
-  datanet:
+  data_automation-net:
     external: true
