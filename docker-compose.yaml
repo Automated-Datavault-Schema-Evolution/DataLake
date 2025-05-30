@@ -6,10 +6,9 @@ services:
       ssh:
         - default
     container_name: DataLakeHandler
-    env_file: .env
+    env_file: .env.docker
     volumes:
       - ./:/app
-      # - ${BULK_OFFSET_FILE}:/app/last_ingest_offset.pkl
       - ${CHECKPOINT_PATH}:/tmp/delta/checkpoints
     networks:
       - data_automation-net
