@@ -19,7 +19,13 @@ def bulk_ingest(spark):
 
     consumer = get_kafka_consumer()
     topic = KAFKA_TOPIC
-    partitions = [TopicPartition(topic, p) for p in consumer.partitions_for_topic(topic)]
+    partition_ids = consumer.partitions_for_topic(topic)
+    if not partition_ids:
+        log.warning(f"No partitions found for topic '{topic}'")
+        consumer.close()
+        return
+
+    partitions = [TopicPartition(topic, p) for p in partition_ids]
     consumer.assign(partitions)
 
     for tp in partitions:
@@ -27,7 +33,7 @@ def bulk_ingest(spark):
         if last_offset is not None:
             consumer.seek(tp, last_offset + 1)
         else:
-            consumer.seek_to_end(tp)
+            consumer.seek_to_beginning(tp)
 
     rows = []
     count = 0
