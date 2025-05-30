@@ -1,25 +1,23 @@
 services:
-  app:
+  ingestion-app:
     build:
       context: .
       dockerfile: Dockerfile
       ssh:
         - default
-    container_name: data-automation-app
+    container_name: DataLakeHandler
     env_file: .env
-    environment:
-      JAVA_HOME: /usr/lib/jvm/java-17-openjdk-amd64
     volumes:
       - ./:/app
-      - ${HOST_DATA_DIRECTORY}:/app/data
-    # depends_on:
-    #   kafka:
-    #     condition: service_healthy
-    #   zookeeper:
-    #     condition: service_healthy
-    ports:
-      - "8000:8000"
-    command: [ "python", "main.py", "--mode", "${PROCESSING_MODE}" ]
+      # - ${BULK_OFFSET_FILE}:/app/last_ingest_offset.pkl
+      - ${CHECKPOINT_PATH}:/tmp/delta/checkpoints
+    networks:
+      - datanet
+    environment:
+      - SSH_AUTH_SOCK=/ssh-agent
+    restart: unless-stopped
 
-volumes:
-  pgdata:
+
+networks:
+  datanet:
+    external: true
