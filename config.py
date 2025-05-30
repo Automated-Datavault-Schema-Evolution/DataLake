@@ -8,14 +8,22 @@ load_dotenv(dotenv_path="postgres/db.env")
 
 # Configuration variables
 LAKE_TYPE = os.getenv("LAKE_TYPE", "parquet")
-DATA_DIRECTORY = os.getenv("DATA_DIRECTORY", "./data")
 
 KAFKA_BOOTSTRAP_SERVERS = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "localhost:9092").split(',')
 KAFKA_TOPIC = os.getenv("KAFKA_TOPIC", "csv_deltas")
 PROCESSING_MODE = os.getenv("PROCESSING_MODE", "stream")
+
+SCHEDULE_TYPE = os.getenv("SCHEDULE_TYPE", "interval")
+SCHEDULE_CRON = os.getenv("SCHEDULE_CRON", "0 3 * * *")
+SCHEDULE_INTERVAL_HOURS = os.getenv("SCHEDULE_INTERVAL_HOURS", 1)
+BULK_OFFSET_FILE = os.getenv("BULK_OFFSET_FILE", "last_ingest_offset.pkl")
 
 POSTGRES_HOST = os.getenv("POSTGRES_HOST", "host.docker.internal")
 POSTGRES_PORT = int(os.getenv("POSTGRES_PORT", "5432"))
 POSTGRES_DB = os.getenv("POSTGRES_DB")
 POSTGRES_USER = os.getenv("POSTGRES_USER")
 POSTGRES_PASSWORD = os.getenv("POSTGRES_PASSWORD")
+
+SPARK_MASTER = os.getenv("SPARK_MASTER", "local[*]")
+
+DELTA_PATH = "delta_file.txt"
