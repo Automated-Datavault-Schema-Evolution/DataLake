@@ -1,10 +1,7 @@
-pandas
-pyarrow
-watchdog
-kafka-python
-confluent_kafka
-python-dotenv
-psycopg2-binary
 pyspark
-lz4
+delta-spark
+pandas
+python-dotenv
+apscheduler
+kafka-python
 git+ssh://git@github.com/Automated-Datavault-Schema-Evolution/MyLogger.git@v0.2.1#egg=mylogger
