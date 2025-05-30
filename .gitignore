@@ -2,6 +2,7 @@
 *.csv
 .venv
 *.env
+.env.docker
 
 ### Python template
 # Byte-compiled / optimized / DLL files
