@@ -15,7 +15,7 @@ PROCESSING_MODE = os.getenv("PROCESSING_MODE", "stream")
 
 SCHEDULE_TYPE = os.getenv("SCHEDULE_TYPE", "interval")
 SCHEDULE_CRON = os.getenv("SCHEDULE_CRON", "0 3 * * *")
-SCHEDULE_INTERVAL_HOURS = os.getenv("SCHEDULE_INTERVAL_HOURS", 1)
+SCHEDULE_INTERVAL_HOURS = int(os.getenv("SCHEDULE_INTERVAL_HOURS", 1))
 BULK_OFFSET_FILE = os.getenv("BULK_OFFSET_FILE", "last_ingest_offset.pkl")
 
 POSTGRES_HOST = os.getenv("POSTGRES_HOST", "host.docker.internal")
@@ -24,6 +24,6 @@ POSTGRES_DB = os.getenv("POSTGRES_DB")
 POSTGRES_USER = os.getenv("POSTGRES_USER")
 POSTGRES_PASSWORD = os.getenv("POSTGRES_PASSWORD")
 
-SPARK_MASTER = os.getenv("SPARK_MASTER", "local[*]")
+SPARK_MASTER = os.getenv("SPARK_MASTER", "spark://spark-master:7077")
 
 DELTA_PATH = "delta_file.txt"
