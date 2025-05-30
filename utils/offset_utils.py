@@ -6,7 +6,7 @@ from logger import log
 
 def read_last_offset(path):
     if not os.path.exists(path):
-        return None
+        return {}
 
     try:
         with open(path, 'rb') as f:
@@ -15,7 +15,7 @@ def read_last_offset(path):
         return offset
     except Exception as e:
         log.warning(f"Failed to read offset from {path}: {e}")
-        return None
+        return {}
 
 
 def write_last_offset(path, offset):
