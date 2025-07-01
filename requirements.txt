@@ -1,7 +1,8 @@
-pyspark==3.5.1
-delta-spark==3.0.0
+pyspark==3.4.1
+delta-spark==2.4.0
 pandas
 python-dotenv
 apscheduler
 kafka-python==2.0.2
+psycopg2-binary
 git+ssh://git@github.com/Automated-Datavault-Schema-Evolution/MyLogger.git@v0.2.1#egg=mylogger

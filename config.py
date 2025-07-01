@@ -9,9 +9,9 @@ load_dotenv(dotenv_path="postgres/db.env")
 # Configuration variables
 LAKE_TYPE = os.getenv("LAKE_TYPE", "parquet")
 
-KAFKA_BOOTSTRAP_SERVERS = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "localhost:9092").split(',')
+KAFKA_BOOTSTRAP_SERVERS = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "kafka:9092")
 KAFKA_TOPIC = os.getenv("KAFKA_TOPIC", "csv_deltas")
-PROCESSING_MODE = os.getenv("PROCESSING_MODE", "stream")
+PROCESSING_MODE = os.getenv("PROCESSING_MODE", "streaming")
 
 SCHEDULE_TYPE = os.getenv("SCHEDULE_TYPE", "interval")
 SCHEDULE_CRON = os.getenv("SCHEDULE_CRON", "0 3 * * *")
