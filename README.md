@@ -68,8 +68,16 @@ SCHEDULE_TYPE=interval      # options: "cron" or "interval"
 SCHEDULE_CRON=0 3 * * *     # Used if SCHEDULE_TYPE=cron
 SCHEDULE_INTERVAL_HOURS=4   # Used if SCHEDULE_TYPE=interval
 
-SPARK_MASTER=spark://spark-master:7077
 DELTA_PATH=delta_files         # path where Delta tables are stored
+
+
+SPARK_MASTER=spark://spark-master:7077
+SPARK_DRIVER_MEMORY=2g      # Spark driver JVM memory
+SPARK_EXECUTOR_MEMORY=2g    # Executor JVM memory per worker
+SPARK_DRIVER_CORES=1        # Cores for the driver
+SPARK_EXECUTOR_CORES=1      # Cores per executor
+SPARK_SQL_SHUFFLE_PARTITIONS=200
+SPARK_DYNAMIC_ALLOCATION=false
 CHECKPOINT_PATH=/tmp/delta/checkpoints
 ````
 
