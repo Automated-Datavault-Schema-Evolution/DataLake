@@ -33,6 +33,7 @@ def bulk_ingest(spark):
         if not batch:
             break
         for tp, messages in batch.items():
+            log.debug(f"Polled {len(messages)} messages from partition {tp.partition}")
             for msg in messages:
                 rows.extend(parse_message_to_row(msg))
                 count += 1
@@ -45,10 +46,12 @@ def bulk_ingest(spark):
         log.info("Bulk fallback: no new records to drain.")
 
     consumer.close()
+    log.debug("Bulk fallback Kafka consumer closed")
 
 
 def streaming_ingest(spark):
     log.info("Start streaming ingestion")
+    log.debug(f"Kafka topic={KAFKA_TOPIC}, bootstrap={KAFKA_BOOTSTRAP_SERVERS}, group-id={KAFKA_GROUP_ID}")
     try:
         from pyspark.sql.functions import from_json, col, udf, explode
         from pyspark.sql.types import ArrayType, MapType
@@ -59,6 +62,7 @@ def streaming_ingest(spark):
             StructField("ingestion_timestamp", StringType()),
             StructField("data", ArrayType(MapType(StringType(), StringType()))),
         ])
+        log.debug(f"Streaming schema: {schema.simpleString()}")
 
         df = (
             spark.readStream.format("kafka")
@@ -111,7 +115,7 @@ def streaming_ingest(spark):
                           ] + [col("row")[k].alias(k) for k in columns]
 
             exploded_flat = exploded.select(*select_cols)
-            if exploded_flat.count() > 0:
+            if exploded_flat.head(1):
                 write_to_delta(exploded_flat, DELTA_PATH)
                 log.info(f"Streaming batch written, epoch {epoch_id}")
 

@@ -10,7 +10,8 @@ from config import KAFKA_BOOTSTRAP_SERVERS, KAFKA_TOPIC, KAFKA_GROUP_ID
 def get_kafka_consumer(group_id=None):
     if group_id is None:
         group_id = KAFKA_GROUP_ID
-    log.info(f"[Kafka] Connecting to bootstrap servers: {KAFKA_BOOTSTRAP_SERVERS} with group_id='{group_id}'")
+    log.info(
+        f"[Kafka] Connecting to bootstrap servers: {KAFKA_BOOTSTRAP_SERVERS} with group_id='{group_id}'")
     try:
         consumer = KafkaConsumer(
             group_id=group_id,
@@ -36,6 +37,7 @@ def get_kafka_consumer(group_id=None):
             log.warning(f"[Kafka] No partitions found for topic '{KAFKA_TOPIC}'.")
 
         consumer.subscribe([KAFKA_TOPIC])
+        log.debug(f"[Kafka] Subscribed to topic '{KAFKA_TOPIC}'")
         return consumer
     except kafka_errors.NoBrokersAvailable:
         log.critical(f"[Kafka] Could not connect to Kafka at {KAFKA_BOOTSTRAP_SERVERS}. No brokers available!")
@@ -50,6 +52,7 @@ def sanity_check_kafka():
         consumer = get_kafka_consumer()
         log.info("[Kafka] Sanity check passed: connected and got consumer.")
         consumer.close()
+        log.debug("[Kafka] Consumer closed after sanity check")
     except Exception as e:
         log.critical(f"[Kafka] Sanity check failed: {e}", exc_info=True)
 
@@ -58,6 +61,9 @@ def create_topic_if_not_exists(topic, num_partitions=3, replication_factor=1):
     from kafka.admin import KafkaAdminClient, NewTopic
 
     admin = KafkaAdminClient(bootstrap_servers=KAFKA_BOOTSTRAP_SERVERS)
+    log.debug(
+        f"[Kafka] Checking for topic '{topic}' (partitions={num_partitions}, replication={replication_factor})"
+    )
     try:
         existing_topics = admin.list_topics()
         if topic not in existing_topics:
@@ -71,3 +77,4 @@ def create_topic_if_not_exists(topic, num_partitions=3, replication_factor=1):
                 log.info(f"[Kafka] Topic '{topic}' created successfully.")
     finally:
         admin.close()
+        log.debug("[Kafka] Admin client closed")

@@ -2,6 +2,7 @@ import os
 import sys
 
 from delta import configure_spark_with_delta_pip
+from logger import log
 from pyspark.sql import SparkSession
 
 from config import SPARK_MASTER
@@ -9,10 +10,21 @@ from config import SPARK_MASTER
 
 def get_spark_session(app_name="Kafka_Consumer_Lake_Handler"):
     spark_master = SPARK_MASTER
+    log.info(f"Initializing Spark session '{app_name}' on master '{spark_master}'")
     builder = (
         SparkSession.builder
         .appName(app_name)
         .master(spark_master)
+        .config("spark.ui.showConsoleProgress", "false")
+    )
+    builder = (
+        builder
+        .config(
+            "spark.driver.extraJavaOptions"
+        )
+        .config(
+            "spark.executor.extraJavaOptions"
+        )
     )
 
     # Ensure Spark uses the same Python interpreter for driver and executors
@@ -31,5 +43,5 @@ def get_spark_session(app_name="Kafka_Consumer_Lake_Handler"):
         "org.apache.spark:spark-token-provider-kafka-0-10_2.12:3.5.6"
     ]
     spark = configure_spark_with_delta_pip(builder, extra_packages=my_packages).getOrCreate()
-
+    log.debug(f"Spark configuration: {spark.sparkContext.getConf().getAll()}")
     return spark
