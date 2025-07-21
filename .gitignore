@@ -3,7 +3,7 @@
 .venv
 *.env
 .env.docker
-/delta_files
+/elta_files/
 
 ### Python template
 # Byte-compiled / optimized / DLL files
