@@ -6,7 +6,17 @@ from psycopg2.extras import execute_values
 from psycopg2.pool import SimpleConnectionPool
 from pyspark.errors import AnalysisException
 
-from config import POSTGRES_HOST, POSTGRES_PORT, POSTGRES_DB, POSTGRES_USER, POSTGRES_PASSWORD, LAKE_TYPE
+from config import (
+    POSTGRES_HOST,
+    POSTGRES_PORT,
+    POSTGRES_DB,
+    POSTGRES_USER,
+    POSTGRES_PASSWORD,
+    LAKE_TYPE,
+)
+
+# Global connection pool for PostgreSQL
+PG_POOL = None
 
 
 def write_to_delta(df, delta_path, partition_by=None):
