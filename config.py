@@ -11,6 +11,8 @@ LAKE_TYPE = os.getenv("LAKE_TYPE", "parquet")
 
 KAFKA_BOOTSTRAP_SERVERS = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "kafka:9092")
 KAFKA_TOPIC = os.getenv("KAFKA_TOPIC", "csv_deltas")
+KAFKA_STARTING_OFFSETS = os.getenv("KAFKA_STARTING_OFFSETS", "earliest")
+KAFKA_GROUP_ID = os.getenv("KAFKA_GROUP_ID", "datalake-stream")
 PROCESSING_MODE = os.getenv("PROCESSING_MODE", "streaming")
 
 SCHEDULE_TYPE = os.getenv("SCHEDULE_TYPE", "interval")

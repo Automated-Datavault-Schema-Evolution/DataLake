@@ -3,10 +3,12 @@ import json
 from kafka import KafkaConsumer, errors as kafka_errors
 from logger import log
 
-from config import KAFKA_BOOTSTRAP_SERVERS, KAFKA_TOPIC
+from config import KAFKA_BOOTSTRAP_SERVERS, KAFKA_TOPIC, KAFKA_GROUP_ID
 
 
-def get_kafka_consumer(group_id="delta-bulk"):
+def get_kafka_consumer(group_id=None):
+    if group_id is None:
+        group_id = KAFKA_GROUP_ID
     log.info(f"[Kafka] Connecting to bootstrap servers: {KAFKA_BOOTSTRAP_SERVERS} with group_id='{group_id}'")
     try:
         consumer = KafkaConsumer(

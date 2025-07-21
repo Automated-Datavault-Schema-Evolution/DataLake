@@ -11,7 +11,7 @@ from config import (
     SCHEDULE_TYPE,
     SCHEDULE_CRON,
     SCHEDULE_INTERVAL_HOURS,
-    PROCESSING_MODE,
+    PROCESSING_MODE, KAFKA_STARTING_OFFSETS, KAFKA_GROUP_ID,
 )
 from utils.kafka_utils import get_kafka_consumer, sanity_check_kafka
 from utils.lake_utils import write_to_delta
@@ -22,8 +22,8 @@ from utils.spark_utiils import get_spark_session
 def bulk_ingest(spark):
     log.info("Bulk fallback: draining any buffered records from Kafka…")
     # Use unified consumer group and let Kafka track offsets
-    consumer = get_kafka_consumer("delta-streaming")
-    consumer.subscribe([KAFKA_TOPIC])
+    consumer = get_kafka_consumer()
+    # consumer.subscribe([KAFKA_TOPIC])
 
     rows = []
     count = 0
@@ -60,12 +60,15 @@ def streaming_ingest(spark):
             StructField("data", ArrayType(MapType(StringType(), StringType()))),
         ])
 
-        df = spark.readStream.format("kafka") \
-            .option("kafka.bootstrap.servers", KAFKA_BOOTSTRAP_SERVERS) \
-            .option("subscribe", KAFKA_TOPIC) \
-            .option("kafka.commit.groupOffsets", "true") \
+        df = (
+            spark.readStream.format("kafka")
+            .option("kafka.bootstrap.servers", KAFKA_BOOTSTRAP_SERVERS)
+            .option("subscribe", KAFKA_TOPIC)
+            .option("startingOffsets", KAFKA_STARTING_OFFSETS)
+            .option("kafka.group.id", KAFKA_GROUP_ID)
+            .option("kafka.commit.groupOffsets", "true")
             .load()
-
+        )
         log.debug(f"Connected to kafka server {KAFKA_BOOTSTRAP_SERVERS} and topic {KAFKA_TOPIC}")
 
         # .option("startingOffsets", "earliest") \

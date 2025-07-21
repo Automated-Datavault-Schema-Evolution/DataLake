@@ -57,6 +57,8 @@ LAKE_TYPE=rdbms
   # Kafka configuration
 KAFKA_BOOTSTRAP_SERVERS=kafka:9092
 KAFKA_TOPIC=csv_deltas
+KAFKA_STARTING_OFFSETS=earliest   # 'earliest' to read all messages
+KAFKA_GROUP_ID=datalake-stream
 PROCESSING_MODE=streaming   # options: streaming or bulk
 
 SCHEDULE_TYPE=interval      # options: "cron" or "interval"
