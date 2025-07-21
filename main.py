@@ -60,7 +60,7 @@ def streaming_ingest(spark):
     log.info("Start streaming ingestion")
     log.debug(f"Kafka topic={KAFKA_TOPIC}, bootstrap={KAFKA_BOOTSTRAP_SERVERS}, group-id={KAFKA_GROUP_ID}")
     try:
-        from pyspark.sql.functions import from_json, col, udf, explode
+        from pyspark.sql.functions import from_json, col, udf, explode, expr
         from pyspark.sql.types import ArrayType, MapType
 
         schema = StructType([
@@ -85,32 +85,55 @@ def streaming_ingest(spark):
         # .option("startingOffsets", "earliest") \
         # .option("kafka.group.id", "delta-streaming") \
 
-        def enrich_rows(data, ingestion_timestamp):
-            if not isinstance(data, list):
-                return []
+        # def enrich_rows(data, ingestion_timestamp):
+        #     if not isinstance(data, list):
+        #         return []
+        #
+        #     for row in data:
+        #         row['source_ingestion_timestamp'] = ingestion_timestamp
+        #     return data
+        #
+        # enrich_udf = udf(enrich_rows, ArrayType(MapType(StringType(), StringType())))
+        #
+        # parsed = df.selectExpr("CAST(value AS STRING) as json_value") \
+        #     .select(from_json(col("json_value"), schema).alias("data")) \
+        #     .select("data.*") \
+        #     .withColumn(
+        #     "rows",
+        #     enrich_udf(col("data"), col("ingestion_timestamp")),
+        # )
 
-            for row in data:
-                row['source_ingestion_timestamp'] = ingestion_timestamp
-            return data
+        parsed = (
+            df.selectExpr("CAST(value AS STRING) as json_value")
+            .select(from_json(col("json_value"), schema).alias("data"))
+            .select("data.*")
+        )
 
-        enrich_udf = udf(enrich_rows, ArrayType(MapType(StringType(), StringType())))
+        parsed_with_ts = parsed.select(
+            "filename",
+            "data_format",
+            "ingestion_timestamp",
+            expr(
+                "transform(data, x -> map_concat(x, map('source_ingestion_timestamp', ingestion_timestamp)))"
+            ).alias("rows"),
+        )
 
-        parsed = df.selectExpr("CAST(value AS STRING) as json_value") \
-            .select(from_json(col("json_value"), schema).alias("data")) \
-            .select("data.*") \
-            .withColumn(
-            "rows",
-            enrich_udf(col("data"), col("ingestion_timestamp")),
+        flattened = parsed_with_ts.select(
+            "filename",
+            "data_format",
+            "ingestion_timestamp",
+            explode(col("rows")).alias("row"),
         )
 
         def process_batch(batch_df, epoch_id):
-            exploded = batch_df.select(
-                col("filename"),
-                col("data_format"),
-                col("ingestion_timestamp"),
-                explode(col("rows")).alias("row"),
-            )
-            sample_row = exploded.select("row").head()
+            # exploded = batch_df.select(
+            #     col("filename"),
+            #     col("data_format"),
+            #     col("ingestion_timestamp"),
+            #     explode(col("rows")).alias("row"),
+            # )
+            # sample_row = exploded.select("row").head()
+            sample_row = batch_df.select("row").head()
             log.debug(sample_row)
             columns = list(sample_row["row"].keys()) if sample_row else []
             select_cols = [
@@ -119,12 +142,14 @@ def streaming_ingest(spark):
                               col("ingestion_timestamp"),
                           ] + [col("row")[k].alias(k) for k in columns]
 
-            exploded_flat = exploded.select(*select_cols)
+            # exploded_flat = exploded.select(*select_cols)
+            exploded_flat = batch_df.select(*select_cols)
             if exploded_flat.head(1):
                 write_to_delta(exploded_flat, DELTA_PATH)
                 log.info(f"Streaming batch written, epoch {epoch_id}")
 
-        (parsed.writeStream.trigger(processingTime="1 second")
+        ##(parsed.writeStream.trigger(processingTime="1 second")
+        (flattened.writeStream.trigger(processingTime="1 second")
          .foreachBatch(process_batch) \
          .outputMode("append") \
          .option("checkpointLocation", "/tmp/delta/checkpoints/streaming/") \

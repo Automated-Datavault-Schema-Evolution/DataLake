@@ -27,5 +27,12 @@ POSTGRES_USER = os.getenv("POSTGRES_USER")
 POSTGRES_PASSWORD = os.getenv("POSTGRES_PASSWORD")
 
 SPARK_MASTER = os.getenv("SPARK_MASTER", "spark://spark-master:7077")
+# Spark resource tuning parameters
+SPARK_DRIVER_MEMORY = os.getenv("SPARK_DRIVER_MEMORY", "2g")
+SPARK_EXECUTOR_MEMORY = os.getenv("SPARK_EXECUTOR_MEMORY", "2g")
+SPARK_DRIVER_CORES = os.getenv("SPARK_DRIVER_CORES", "1")
+SPARK_EXECUTOR_CORES = os.getenv("SPARK_EXECUTOR_CORES", "1")
+SPARK_SQL_SHUFFLE_PARTITIONS = int(os.getenv("SPARK_SQL_SHUFFLE_PARTITIONS", "200"))
+SPARK_DYNAMIC_ALLOCATION = os.getenv("SPARK_DYNAMIC_ALLOCATION", "false").lower() == "true"
 
 DELTA_PATH = os.getenv("DELTA_PATH", "delta_files")

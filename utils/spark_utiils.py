@@ -5,7 +5,15 @@ from delta import configure_spark_with_delta_pip
 from logger import log
 from pyspark.sql import SparkSession
 
-from config import SPARK_MASTER
+from config import (
+    SPARK_MASTER,
+    SPARK_DRIVER_MEMORY,
+    SPARK_EXECUTOR_MEMORY,
+    SPARK_DRIVER_CORES,
+    SPARK_EXECUTOR_CORES,
+    SPARK_SQL_SHUFFLE_PARTITIONS,
+    SPARK_DYNAMIC_ALLOCATION,
+)
 
 
 def get_spark_session(app_name="Kafka_Consumer_Lake_Handler"):
@@ -16,16 +24,15 @@ def get_spark_session(app_name="Kafka_Consumer_Lake_Handler"):
         .appName(app_name)
         .master(spark_master)
         .config("spark.ui.showConsoleProgress", "false")
+        .config("spark.driver.memory", SPARK_DRIVER_MEMORY)
+        .config("spark.executor.memory", SPARK_EXECUTOR_MEMORY)
+        .config("spark.driver.cores", SPARK_DRIVER_CORES)
+        .config("spark.executor.cores", SPARK_EXECUTOR_CORES)
+        .config("spark.sql.shuffle.partitions", SPARK_SQL_SHUFFLE_PARTITIONS)
     )
-    # builder = (
-    #     builder
-    #     .config(
-    #         "spark.driver.extraJavaOptions"
-    #     )
-    #     .config(
-    #         "spark.executor.extraJavaOptions"
-    #     )
-    # )
+
+    if SPARK_DYNAMIC_ALLOCATION:
+        builder = builder.config("spark.dynamicAllocation.enabled", "true")
 
     # Ensure Spark uses the same Python interpreter for driver and executors
     python_exec = sys.executable
