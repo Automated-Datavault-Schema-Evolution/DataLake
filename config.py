@@ -27,4 +27,4 @@ POSTGRES_PASSWORD = os.getenv("POSTGRES_PASSWORD")
 
 SPARK_MASTER = os.getenv("SPARK_MASTER", "spark://spark-master:7077")
 
-DELTA_PATH = "delta_file.txt"
+DELTA_PATH = "delta_files"
