@@ -10,6 +10,7 @@ services:
     volumes:
       - ./:/app
       - ${CHECKPOINT_PATH}:/tmp/delta/checkpoints
+      - ${HOST_DATA_DIRECTORY}:/app/data
     networks:
       - data_automation-net
     environment:
