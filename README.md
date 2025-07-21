@@ -11,8 +11,9 @@ to run locally or via Docker Compose.
 2. **Spark Structured Streaming** – `main.py` establishes a Spark session and listens to the Kafka topic. Records are
    parsed and enriched before being written to Delta files. If `LAKE_TYPE` is `rdbms`, each batch is also written to
    PostgreSQL.
-3. **Bulk Fallback** – If streaming fails, or when running in bulk mode, the application uses a plain `KafkaConsumer` to
-   drain all buffered messages and write them to the data lake.
+3. **Bulk Fallback** – If streaming fails or the Kafka backlog exceeds `KAFKA_BACKLOG_THRESHOLD`,
+   the application switches to a plain `KafkaConsumer` to drain buffered messages and
+   write them in one batch to the data lake.
 4. **Delta Storage / Postgres** – Data is stored in Delta format under `DELTA_PATH` and optionally mirrored to a
    PostgreSQL database. Initial bulk ingestion from existing CSV files is handled by `data_lake.py`.
 
@@ -45,8 +46,9 @@ The easiest way to run the ingestion service is via Docker Compose:
 docker compose up --build
 ```
 
-A `.env.docker` file must be present with the environment variables described below. For local development you can
-create an `.env` file instead.
+A `.env.docker` file must be present with the environment variables described below.
+For local development you can create an `.env` file instead. Database credentials
+may also be supplied in `postgres/db.env`, which is loaded automatically if present.
 
 ### Environment Variables
 
@@ -59,6 +61,7 @@ KAFKA_BOOTSTRAP_SERVERS=kafka:9092
 KAFKA_TOPIC=csv_deltas
 KAFKA_STARTING_OFFSETS=earliest   # 'earliest' to read all messages
 KAFKA_GROUP_ID=datalake-stream
+KAFKA_BACKLOG_THRESHOLD=1000     # switch to bulk mode if backlog exceeds this
 PROCESSING_MODE=streaming   # options: streaming or bulk
 
 SCHEDULE_TYPE=interval      # options: "cron" or "interval"
@@ -66,6 +69,7 @@ SCHEDULE_CRON=0 3 * * *     # Used if SCHEDULE_TYPE=cron
 SCHEDULE_INTERVAL_HOURS=4   # Used if SCHEDULE_TYPE=interval
 
 SPARK_MASTER=spark://spark-master:7077
+DELTA_PATH=delta_files         # path where Delta tables are stored
 CHECKPOINT_PATH=/tmp/delta/checkpoints
 ````
 
@@ -92,14 +96,14 @@ POSTGRES_PASSWORD=postgres
 ## Running the Service
 
 1. Prepare your environment variables in `.env` or `.env.docker`.
+   If PostgreSQL is used, place the credentials in `postgres/db.env`.
 2. Ensure Kafka and (optionally) PostgreSQL are accessible.
 3. Start the application using Docker Compose or run `python main.py` locally.
-4. For initial historical ingestion of CSV files, run `python data_lake.py` once before starting the stream processor.
 
 ## Data Persistence
 
-- **Delta Lake** – Batches are stored under the directory pointed to by `DELTA_PATH`. If
-  `partition_by="source_filename"` is used, each file's records are partitioned accordingly.
+- **Delta Lake** – Parquet-Files are stored under the directory pointed to by `DELTA_PATH`. If files are not existed,
+  the application creates them automatically.
 - **PostgreSQL** – When `LAKE_TYPE=rdbms`, `utils.lake_utils.store_to_rdbms` writes each batch to a table named after
   the source filename. Tables are created automatically if they do not exist.
 
