@@ -1,7 +1,9 @@
 import json
 
 from kafka import KafkaConsumer, errors as kafka_errors
+from kafka.admin import KafkaAdminClient
 from kafka.errors import TopicAlreadyExistsError
+from kafka.structs import TopicPartition
 from logger import log
 
 from config import KAFKA_BOOTSTRAP_SERVERS, KAFKA_TOPIC, KAFKA_GROUP_ID
@@ -78,3 +80,46 @@ def create_topic_if_not_exists(topic, num_partitions=3, replication_factor=1):
     finally:
         admin.close()
         log.debug("[Kafka] Admin client closed")
+
+
+def get_topic_backlog(group_id=None):
+    """Return the number of messages not yet consumed for the given group.
+
+    This uses the Kafka Admin API to read committed offsets without joining the
+    consumer group, avoiding rebalances of the streaming consumer."""
+    admin = None
+    consumer = None
+    try:
+        if group_id is None:
+            group_id = KAFKA_GROUP_ID
+
+        admin = KafkaAdminClient(bootstrap_servers=KAFKA_BOOTSTRAP_SERVERS)
+        consumer = KafkaConsumer(bootstrap_servers=KAFKA_BOOTSTRAP_SERVERS)
+
+        partitions = consumer.partitions_for_topic(KAFKA_TOPIC)
+        if not partitions:
+            log.warning("[Kafka] No partitions found for backlog check")
+            return 0
+        tps = [TopicPartition(KAFKA_TOPIC, p) for p in partitions]
+        end_offsets = consumer.end_offsets(tps)
+
+        group_offsets = admin.list_consumer_group_offsets(group_id, partitions=tps)
+
+        backlog = 0
+        for tp in tps:
+            committed = 0
+            meta = group_offsets.get(tp)
+            if meta is not None:
+                committed = meta.offset
+            backlog += end_offsets.get(tp, 0) - committed
+
+        log.info(f"[Kafka] Calculated backlog: {backlog} messages")
+        return backlog
+    except Exception as e:
+        log.error(f"[Kafka] Failed to compute backlog: {e}", exc_info=True)
+        return 0
+    finally:
+        if consumer:
+            consumer.close()
+        if admin:
+            admin.close()

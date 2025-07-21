@@ -21,8 +21,9 @@ PG_POOL = None
 
 def write_to_delta(df, delta_path, partition_by=None):
     """
-    Always writes to Delta Lake at the given path, optionally partitioned by column.
-    If LAKE_TYPE is 'rdbms', also writes to Postgres with table name based on 'source_filename'.
+     Data is written to Delta unless ``LAKE_TYPE`` is ``"rdbms"``.  When running
+    in RDBMS mode, the batch is only stored in PostgreSQL using a table name
+    derived from the ``filename`` column if present.
     """
     # Get the filename/table from the data if present
     if 'filename' in df.columns:
@@ -30,21 +31,29 @@ def write_to_delta(df, delta_path, partition_by=None):
         filename = df.select('filename').head()['filename']
         table_name = os.path.splitext(os.path.basename(filename))[0].replace('.', '_').replace('-', '_')
         target_path = os.path.join(delta_path, table_name)
+        df = df.drop('filename')
     else:
         # Fallback if not present
         table_name = None
         target_path = delta_path
 
-    try:
-        if partition_by and partition_by in df.columns:
-            df.write.format("delta").mode("append").partitionBy(partition_by).save(target_path)
-        else:
-            df.write.format("delta").mode("append").save(target_path)
-        log.info(f"Written batch to Delta Lake at {target_path}")
-    except AnalysisException as e:
-        log.error(f"Delta Lake AnalysisException: {e}")
-    except Exception as e:
-        log.error(f"Error saving Delta file {target_path}: {e}")
+    if 'data_format' in df.columns:
+        df = df.drop('data_format')
+    drop_cols = [c for c in ['source_filename', 'source_data_format'] if c in df.columns]
+    if drop_cols:
+        df = df.drop(*drop_cols)
+
+    if LAKE_TYPE != 'rdbms':
+        try:
+            if partition_by and partition_by in df.columns:
+                df.write.format("delta").mode("append").partitionBy(partition_by).save(target_path)
+            else:
+                df.write.format("delta").mode("append").save(target_path)
+            log.info(f"Written batch to Delta Lake at {target_path}")
+        except AnalysisException as e:
+            log.error(f"Delta Lake AnalysisException: {e}")
+        except Exception as e:
+            log.error(f"Error saving Delta file {target_path}: {e}")
 
     # If configured, also store in RDBMS with table name from filename
     if LAKE_TYPE == "rdbms" and table_name is not None:

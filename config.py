@@ -14,6 +14,7 @@ KAFKA_TOPIC = os.getenv("KAFKA_TOPIC", "csv_deltas")
 KAFKA_STARTING_OFFSETS = os.getenv("KAFKA_STARTING_OFFSETS", "earliest")
 KAFKA_GROUP_ID = os.getenv("KAFKA_GROUP_ID", "datalake-stream")
 PROCESSING_MODE = os.getenv("PROCESSING_MODE", "streaming")
+KAFKA_BACKLOG_THRESHOLD = int(os.getenv("KAFKA_BACKLOG_THRESHOLD", "1000"))
 
 SCHEDULE_TYPE = os.getenv("SCHEDULE_TYPE", "interval")
 SCHEDULE_CRON = os.getenv("SCHEDULE_CRON", "0 3 * * *")
@@ -27,4 +28,4 @@ POSTGRES_PASSWORD = os.getenv("POSTGRES_PASSWORD")
 
 SPARK_MASTER = os.getenv("SPARK_MASTER", "spark://spark-master:7077")
 
-DELTA_PATH = "delta_files"
+DELTA_PATH = os.getenv("DELTA_PATH", "delta_files")

@@ -11,9 +11,9 @@ from config import (
     SCHEDULE_TYPE,
     SCHEDULE_CRON,
     SCHEDULE_INTERVAL_HOURS,
-    PROCESSING_MODE, KAFKA_STARTING_OFFSETS, KAFKA_GROUP_ID,
+    PROCESSING_MODE, KAFKA_STARTING_OFFSETS, KAFKA_GROUP_ID, KAFKA_BACKLOG_THRESHOLD,
 )
-from utils.kafka_utils import get_kafka_consumer, sanity_check_kafka
+from utils.kafka_utils import get_kafka_consumer, sanity_check_kafka, get_topic_backlog
 from utils.lake_utils import write_to_delta
 from utils.parse_utils import parse_message_to_row
 from utils.spark_utiils import get_spark_session
@@ -23,25 +23,32 @@ def bulk_ingest(spark):
     log.info("Bulk fallback: draining any buffered records from Kafka…")
     # Use unified consumer group and let Kafka track offsets
     consumer = get_kafka_consumer()
-    # consumer.subscribe([KAFKA_TOPIC])
 
     rows = []
     count = 0
+    empty_polls = 0
 
-    while True:
+    while empty_polls < 3:
         batch = consumer.poll(timeout_ms=1000, max_records=1000)
         if not batch:
-            break
+            empty_polls += 1
+            continue
+        empty_polls = 0
         for tp, messages in batch.items():
             log.debug(f"Polled {len(messages)} messages from partition {tp.partition}")
             for msg in messages:
-                rows.extend(parse_message_to_row(msg))
-                count += 1
+                parsed_rows = parse_message_to_row(msg) or []
+                for row in parsed_rows:
+                    # keep filename and format only for routing, not for storage
+                    row['filename'] = msg.value.get('filename')
+                    row['data_format'] = msg.value.get('data_format')
+                rows.extend(parsed_rows)
+                count += len(parsed_rows)
 
     if rows:
         df = spark.createDataFrame(rows)
         write_to_delta(df, DELTA_PATH)
-        log.info(f"Bulk fallback wrote {count} rows to Δ-lake")
+        log.info(f"Bulk fallback wrote {count} rows to delta-lake")
     else:
         log.info("Bulk fallback: no new records to drain.")
 
@@ -78,13 +85,11 @@ def streaming_ingest(spark):
         # .option("startingOffsets", "earliest") \
         # .option("kafka.group.id", "delta-streaming") \
 
-        def enrich_rows(data, filename, data_format, ingestion_timestamp):
+        def enrich_rows(data, ingestion_timestamp):
             if not isinstance(data, list):
                 return []
 
             for row in data:
-                row['source_filename'] = filename
-                row['source_data_format'] = data_format
                 row['source_ingestion_timestamp'] = ingestion_timestamp
             return data
 
@@ -95,7 +100,7 @@ def streaming_ingest(spark):
             .select("data.*") \
             .withColumn(
             "rows",
-            enrich_udf(col("data"), col("filename"), col("data_format"), col("ingestion_timestamp")),
+            enrich_udf(col("data"), col("ingestion_timestamp")),
         )
 
         def process_batch(batch_df, epoch_id):
@@ -157,6 +162,15 @@ def main():
     if PROCESSING_MODE == 'streaming':
         while True:
             try:
+                backlog = get_topic_backlog()
+                if backlog > KAFKA_BACKLOG_THRESHOLD:
+                    log.warning(
+                        f"Kafka backlog {backlog} exceeds threshold {KAFKA_BACKLOG_THRESHOLD}. Using bulk ingestion"
+                    )
+                    bulk_ingest(spark)
+                    log.info("Re-checking backlog in 30s…")
+                    time.sleep(30)
+                    continue
                 streaming_ingest(spark)
             except Exception:
                 log.error(

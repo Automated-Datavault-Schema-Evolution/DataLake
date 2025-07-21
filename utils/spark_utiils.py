@@ -17,15 +17,15 @@ def get_spark_session(app_name="Kafka_Consumer_Lake_Handler"):
         .master(spark_master)
         .config("spark.ui.showConsoleProgress", "false")
     )
-    builder = (
-        builder
-        .config(
-            "spark.driver.extraJavaOptions"
-        )
-        .config(
-            "spark.executor.extraJavaOptions"
-        )
-    )
+    # builder = (
+    #     builder
+    #     .config(
+    #         "spark.driver.extraJavaOptions"
+    #     )
+    #     .config(
+    #         "spark.executor.extraJavaOptions"
+    #     )
+    # )
 
     # Ensure Spark uses the same Python interpreter for driver and executors
     python_exec = sys.executable
