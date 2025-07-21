@@ -39,7 +39,7 @@ def bulk_ingest(spark):
 
     if rows:
         df = spark.createDataFrame(rows)
-        write_to_delta(df, DELTA_PATH, partition_by="source_filename")
+        write_to_delta(df, DELTA_PATH)
         log.info(f"Bulk fallback wrote {count} rows to Δ-lake")
     else:
         log.info("Bulk fallback: no new records to drain.")
@@ -112,7 +112,7 @@ def streaming_ingest(spark):
 
             exploded_flat = exploded.select(*select_cols)
             if exploded_flat.count() > 0:
-                write_to_delta(exploded_flat, DELTA_PATH, partition_by="source_filename")
+                write_to_delta(exploded_flat, DELTA_PATH)
                 log.info(f"Streaming batch written, epoch {epoch_id}")
 
         (parsed.writeStream.trigger(processingTime="1 second")
