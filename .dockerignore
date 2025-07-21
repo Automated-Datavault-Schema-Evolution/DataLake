@@ -2,7 +2,6 @@ __pycache__/
 *.pyc
 *.pyo
 *.pyd
-last_ingest_offset.pkl
 .env
 tmp/
 .DS_Store

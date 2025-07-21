@@ -16,7 +16,6 @@ PROCESSING_MODE = os.getenv("PROCESSING_MODE", "streaming")
 SCHEDULE_TYPE = os.getenv("SCHEDULE_TYPE", "interval")
 SCHEDULE_CRON = os.getenv("SCHEDULE_CRON", "0 3 * * *")
 SCHEDULE_INTERVAL_HOURS = int(os.getenv("SCHEDULE_INTERVAL_HOURS", 1))
-BULK_OFFSET_FILE = os.getenv("BULK_OFFSET_FILE", "last_ingest_offset.pkl")
 
 POSTGRES_HOST = os.getenv("POSTGRES_HOST", "host.docker.internal")
 POSTGRES_PORT = int(os.getenv("POSTGRES_PORT", "5432"))

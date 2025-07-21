@@ -62,7 +62,6 @@ PROCESSING_MODE=streaming   # options: streaming or bulk
 SCHEDULE_TYPE=interval      # options: "cron" or "interval"
 SCHEDULE_CRON=0 3 * * *     # Used if SCHEDULE_TYPE=cron
 SCHEDULE_INTERVAL_HOURS=4   # Used if SCHEDULE_TYPE=interval
-BULK_OFFSET_FILE=last_ingest_offset.pkl
 
 SPARK_MASTER=spark://spark-master:7077
 CHECKPOINT_PATH=/tmp/delta/checkpoints
