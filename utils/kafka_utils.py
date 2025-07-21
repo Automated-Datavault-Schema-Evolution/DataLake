@@ -1,6 +1,7 @@
 import json
 
 from kafka import KafkaConsumer, errors as kafka_errors
+from kafka.errors import TopicAlreadyExistsError
 from logger import log
 
 from config import KAFKA_BOOTSTRAP_SERVERS, KAFKA_TOPIC, KAFKA_GROUP_ID
@@ -57,9 +58,16 @@ def create_topic_if_not_exists(topic, num_partitions=3, replication_factor=1):
     from kafka.admin import KafkaAdminClient, NewTopic
 
     admin = KafkaAdminClient(bootstrap_servers=KAFKA_BOOTSTRAP_SERVERS)
-    existing_topics = admin.list_topics()
-    if topic not in existing_topics:
-        new = NewTopic(name=topic, num_partitions=num_partitions, replication_factor=replication_factor)
-        admin.create_topics([new])
-        log.info(f"Topic {topic} created successfully.")
-    admin.close()
+    try:
+        existing_topics = admin.list_topics()
+        if topic not in existing_topics:
+            log.info(f"[Kafka] Topic '{topic}' does not exist. Creating …")
+            new = NewTopic(name=topic, num_partitions=num_partitions, replication_factor=replication_factor)
+            try:
+                admin.create_topics([new])
+            except TopicAlreadyExistsError:
+                log.debug(f"[Kafka] Topic '{topic}' was created concurrently.")
+            else:
+                log.info(f"[Kafka] Topic '{topic}' created successfully.")
+    finally:
+        admin.close()
