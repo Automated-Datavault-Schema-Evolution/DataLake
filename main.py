@@ -84,6 +84,16 @@ def bulk_ingest(spark, max_messages=None):
     else:
         log.info("Bulk fallback: no new records to drain.")
 
+    # commit offsets so backlog calculation reflects drained records
+    try:
+        consumer.commit()
+        log.debug("Bulk fallback committed offsets")
+    except Exception as e:
+        log.error(f"Failed to commit offsets after bulk ingestion: {e}")
+    # Log updated backlog after draining
+    backlog = get_topic_backlog()
+    log.info(f"Backlog after bulk ingestion: {backlog} messages")
+
     consumer.close()
     log.debug("Bulk fallback Kafka consumer closed")
 
@@ -114,27 +124,6 @@ def streaming_ingest(spark):
         )
         log.debug(f"Connected to kafka server {KAFKA_BOOTSTRAP_SERVERS} and topic {KAFKA_TOPIC}")
 
-        # .option("startingOffsets", "earliest") \
-        # .option("kafka.group.id", "delta-streaming") \
-
-        # def enrich_rows(data, ingestion_timestamp):
-        #     if not isinstance(data, list):
-        #         return []
-        #
-        #     for row in data:
-        #         row['source_ingestion_timestamp'] = ingestion_timestamp
-        #     return data
-        #
-        # enrich_udf = udf(enrich_rows, ArrayType(MapType(StringType(), StringType())))
-        #
-        # parsed = df.selectExpr("CAST(value AS STRING) as json_value") \
-        #     .select(from_json(col("json_value"), schema).alias("data")) \
-        #     .select("data.*") \
-        #     .withColumn(
-        #     "rows",
-        #     enrich_udf(col("data"), col("ingestion_timestamp")),
-        # )
-
         parsed = (
             df.selectExpr("CAST(value AS STRING) as json_value")
             .select(from_json(col("json_value"), schema).alias("data"))
@@ -157,30 +146,6 @@ def streaming_ingest(spark):
             explode(col("rows")).alias("row"),
         )
 
-        # def process_batch(batch_df, epoch_id):
-        #     # exploded = batch_df.select(
-        #     #     col("filename"),
-        #     #     col("data_format"),
-        #     #     col("ingestion_timestamp"),
-        #     #     explode(col("rows")).alias("row"),
-        #     # )
-        #     # sample_row = exploded.select("row").head()
-        #     sample_row = batch_df.select("row").head()
-        #     log.debug(sample_row)
-        #     columns = list(sample_row["row"].keys()) if sample_row else []
-        #     select_cols = [
-        #                       col("filename"),
-        #                       col("data_format"),
-        #                       col("ingestion_timestamp"),
-        #                   ] + [col("row")[k].alias(k) for k in columns]
-        #
-        #     # exploded_flat = exploded.select(*select_cols)
-        #     exploded_flat = batch_df.select(*select_cols)
-        #     if exploded_flat.head(1):
-        #         write_to_delta(exploded_flat, DELTA_PATH)
-        #         log.info(f"Streaming batch written, epoch {epoch_id}")
-
-        ##(parsed.writeStream.trigger(processingTime="1 second")
         (flattened.writeStream.trigger(processingTime="1 second")
          .foreachBatch(process_batch) \
          .outputMode("append") \
