@@ -28,8 +28,12 @@ def bulk_ingest(spark):
     count = 0
     empty_polls = 0
 
-    while empty_polls < 3:
-        batch = consumer.poll(timeout_ms=1000, max_records=1000)
+    while empty_polls < 3 and (max_messages is None or count < max_messages):
+        max_records = 1000
+        if max_messages is not None:
+            remaining = max_messages - count
+            max_records = min(max_records, remaining)
+        batch = consumer.poll(timeout_ms=1000, max_records=max_records)
         if not batch:
             empty_polls += 1
             continue
@@ -192,9 +196,15 @@ def main():
                     log.warning(
                         f"Kafka backlog {backlog} exceeds threshold {KAFKA_BACKLOG_THRESHOLD}. Using bulk ingestion"
                     )
-                    bulk_ingest(spark)
-                    log.info("Re-checking backlog in 30s…")
-                    time.sleep(30)
+                    while backlog > 0:
+                        to_drain = min(backlog, BACKLOG_BATCH_SIZE)
+                        log.info(f"Draining {to_drain} messages from backlog")
+                        bulk_ingest(spark, max_messages=to_drain)
+                        backlog = get_topic_backlog()
+                        if backlog > 0:
+                            log.info(f"{backlog} messages remain in backlog")
+                    log.info("Re-checking backlog in 5s…")
+                    time.sleep(5)
                     continue
                 streaming_ingest(spark)
             except Exception:
