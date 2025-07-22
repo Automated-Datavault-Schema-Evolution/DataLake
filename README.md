@@ -1,8 +1,16 @@
 # Data Lake Ingestion Service
 
-This repository provides a Python based ingestion service that consumes CSV deltas from a Kafka topic and persists the
-data into a Delta Lake or relational database. The service can operate in **streaming** or **bulk** mode and is packaged
-to run locally or via Docker Compose.
+This repository provides a Python based ingestion service that consumes delta from a Kafka topic created by the
+[Filewatcher Service](https://github.com/Automated-Datavault-Schema-Evolution/FileWatcher) and persists the data into a
+Delta Lake or relational database. The service can operate in **streaming** or **bulk** mode and is packaged to run
+locally or via Docker Compose.
+
+## Quick Start
+
+1. Copy `.env.docker` from the example in this README and adjust any paths or credentials.
+2. Launch the service with `docker compose up --build`.
+3. Messages arriving at the Kafka topic will be persisted to Delta Lake or PostgreSQL depending on `LAKE_TYPE`.
+4. For local testing without Docker compose you can run `pip install -r requirements.txt` followed by `python main.py`.
 
 ## Architecture Overview
 
@@ -62,6 +70,8 @@ KAFKA_TOPIC=csv_deltas
 KAFKA_STARTING_OFFSETS=earliest   # 'earliest' to read all messages
 KAFKA_GROUP_ID=datalake-stream
 KAFKA_BACKLOG_THRESHOLD=1000     # switch to bulk mode if backlog exceeds this
+BACKLOG_BATCH_SIZE=500          # messages drained per backlog batch
+
 PROCESSING_MODE=streaming   # options: streaming or bulk
 
 SCHEDULE_TYPE=interval      # options: "cron" or "interval"
@@ -78,10 +88,37 @@ SPARK_DRIVER_CORES=1        # Cores for the driver
 SPARK_EXECUTOR_CORES=1      # Cores per executor
 SPARK_SQL_SHUFFLE_PARTITIONS=200
 SPARK_DYNAMIC_ALLOCATION=false
+SPARK_DYNAMIC_ALLOCATION_MIN_EXECUTORS=1
+SPARK_DYNAMIC_ALLOCATION_MAX_EXECUTORS=10
+SPARK_DYNAMIC_ALLOCATION_INITIAL_EXECUTORS=1
+SPARK_SERIALIZER=org.apache.spark.serializer.KryoSerializer
+SPARK_KRYO_BUFFER_MAX=256m
+SPARK_ADAPTIVE_EXECUTION=true
+SPARK_DYNAMIC_SHUFFLE_TRACKING=true
+
 CHECKPOINT_PATH=/tmp/delta/checkpoints
 ````
 
-Database settings if using the RDBMS mode:
+Enabling `SPARK_DYNAMIC_ALLOCATION` allows the Spark cluster to grow or shrink
+between `SPARK_DYNAMIC_ALLOCATION_MIN_EXECUTORS` and
+`SPARK_DYNAMIC_ALLOCATION_MAX_EXECUTORS` based on load.
+`SPARK_SERIALIZER` and `SPARK_KRYO_BUFFER_MAX` enable the faster Kryo serializer
+with an increased buffer to avoid large task warnings. `SPARK_ADAPTIVE_EXECUTION`
+and `SPARK_DYNAMIC_SHUFFLE_TRACKING` allow Spark to optimize shuffle partitions
+and scale executors dynamically without restarting the application.
+
+When the Kafka backlog exceeds `KAFKA_BACKLOG_THRESHOLD`, messages are drained
+in batches of size `BACKLOG_BATCH_SIZE` until the backlog is cleared.
+
+Database settings if using the RDBMS mode
+Below is a brief description of the most important variables:
+
+- `LAKE_TYPE` defines whether data is only kept in Delta files (`parquet`) or also mirrored to Postgres (`rdbms`).
+- `PROCESSING_MODE` chooses between continuous streaming from Kafka or scheduled bulk imports.
+- `KAFKA_BACKLOG_THRESHOLD` controls when the service falls back to batch mode if the topic accumulates too many
+  messages.
+- `BACKLOG_BATCH_SIZE` limits how many messages are drained in one run during backlog processing.
+- The `SPARK_*` parameters tune Spark resources and enable automatic scaling when dynamic allocation is turned on.
 
 ````yaml
 POSTGRES_HOST=host.docker.internal
@@ -91,12 +128,14 @@ POSTGRES_USER=postgres
 POSTGRES_PASSWORD=postgres
 ````
 
+Use these parameters to point the service to your PostgreSQL database. Leave them blank if you do not need RDBMS
+support.
+
 ## Components
 
 | File                  | Description                                                                                                                         |
 |-----------------------|-------------------------------------------------------------------------------------------------------------------------------------|
 | `main.py`             | Entry point for the ingestion service. Handles streaming ingestion from Kafka with a fallback to bulk mode and optional scheduling. |
-| `data_lake.py`        | One-time importer that loads CSV files from `DATA_DIRECTORY` into the data lake and database.                                       |
 | `utils/`              | Helper modules for Kafka connectivity, Spark session creation, parsing messages, offset handling and writing to Delta/Postgres.     |
 | `docker-compose.yaml` | Defines the containerized setup for running the service together with its dependencies.                                             |
 | `Dockerfile`          | Builds the Python image with Java, Spark and all required libraries.                                                                |
