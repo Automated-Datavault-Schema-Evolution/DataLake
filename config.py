@@ -26,6 +26,8 @@ POSTGRES_PORT = int(os.getenv("POSTGRES_PORT", "5432"))
 POSTGRES_DB = os.getenv("POSTGRES_DB")
 POSTGRES_USER = os.getenv("POSTGRES_USER")
 POSTGRES_PASSWORD = os.getenv("POSTGRES_PASSWORD")
+POSTGRES_POOL_MIN = int(os.getenv("POSTGRES_POOL_MIN", "1"))
+POSTGRES_POOL_MAX = int(os.getenv("POSTGRES_POOL_MAX", "5"))
 
 SPARK_MASTER = os.getenv("SPARK_MASTER", "spark://spark-master:7077")
 # Spark resource tuning parameters

@@ -126,6 +126,8 @@ POSTGRES_PORT=5432
 POSTGRES_DB=datalake
 POSTGRES_USER=postgres
 POSTGRES_PASSWORD=postgres
+POSTGRES_POOL_MIN=1
+POSTGRES_POOL_MAX=5
 ````
 
 Use these parameters to point the service to your PostgreSQL database. Leave them blank if you do not need RDBMS

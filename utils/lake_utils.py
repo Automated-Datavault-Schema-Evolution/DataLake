@@ -12,7 +12,7 @@ from config import (
     POSTGRES_DB,
     POSTGRES_USER,
     POSTGRES_PASSWORD,
-    LAKE_TYPE,
+    LAKE_TYPE, POSTGRES_POOL_MAX,
 )
 
 # Global connection pool for PostgreSQL
@@ -72,12 +72,16 @@ def write_to_parquet(spark_df, output_path, mode='append', partition_by=None):
         log.error(f"Failed to write to Parquet file: {e}", exc_info=True)
 
 
-def init_postgres_pool(minconn=1, maxconn=5):
+def init_postgres_pool(minconn=None, maxconn=None):
     """
         Initialize and return a global psycopg2 connection pool.
         This pool will be used by all threads.
         """
     global PG_POOL
+    if minconn is None:
+        minconn = POSTGRES_POOL_MAX
+    if maxconn is None:
+        maxconn = POSTGRES_POOL_MAX
     if PG_POOL is None:
         try:
             PG_POOL = SimpleConnectionPool(
@@ -105,9 +109,29 @@ def get_postgres_connection():
     pool = init_postgres_pool()
     try:
         conn = pool.getconn()
+        if conn.closed:
+            log.warning("Received closed connection from pool; replacing it.")
+            pool.putconn(conn, close=True)
+            conn = pool.getconn()
         log.debug("Acquired connection from pool.")
         return conn
     except Exception as e:
+        msg = str(e)
+        if "connection pool exhausted" in msg.lower():
+            new_max = pool.maxconn + 5
+            log.warning(
+                f"Connection pool exhausted. Expanding pool to {new_max} connections."
+            )
+            # close existing pool and recreate with larger size
+            try:
+                pool.closeall()
+            except Exception:
+                pass
+            # reinitialize pool with larger max
+            init_postgres_pool(pool.minconn, new_max)
+            pool = PG_POOL
+            conn = pool.getconn()
+            return conn
         log.error(f"Error getting connection from pool: {e}")
         raise
 
@@ -117,26 +141,37 @@ def release_postgres_connection(conn):
     Return the connection back to the pool.
     """
     pool = init_postgres_pool()
-    pool.putconn(conn)
-    log.debug("Released connection back to pool.")
+    try:
+        if conn.closed:
+            pool.putconn(conn, close=True)
+            log.debug("Closed dead connection from pool.")
+        else:
+            pool.putconn(conn)
+            log.debug("Released connection back to pool.")
+    except Exception as e:
+        log.error(f"Error releasing connection: {e}")
 
 
 def table_exists(table_name):
     """
     Check whether a table exists in PostgreSQL
     """
+    conn = None
     try:
         conn = get_postgres_connection()
         cur = conn.cursor()
         cur.execute("SELECT to_regclass(%s)", (f"public.{table_name}",))
         result = cur.fetchone()
         cur.close()
-        release_postgres_connection(conn)
+
         log.debug(f"Checked existence for table '{table_name}': {result[0]}")
         return result[0] is not None
     except Exception as e:
         log.error(f"Error checking existence of table '{table_name}': {e}")
         return False
+    finally:
+        if conn:
+            release_postgres_connection(conn)
 
 
 def create_table_if_not_exists(table_name, pdf):
@@ -163,6 +198,8 @@ def create_table_if_not_exists(table_name, pdf):
     col_defs_str = ", ".join(col_defs)
     create_sql = f"CREATE TABLE IF NOT EXISTS {table_name} ({col_defs_str});"
     log.debug(f"CREATE TABLE SQL for '{table_name}': {create_sql}")
+
+    conn = None
     try:
         conn = get_postgres_connection()
         cur = conn.cursor()
@@ -174,6 +211,9 @@ def create_table_if_not_exists(table_name, pdf):
     except Exception as e:
         log.error(f"Error creating table '{table_name}': {e}")
         raise
+    finally:
+        if conn:
+            release_postgres_connection(conn)
 
 
 def bulk_insert_dataframe(pdf, table_name, drop_columns=None, context=""):
@@ -212,6 +252,7 @@ def bulk_insert_dataframe(pdf, table_name, drop_columns=None, context=""):
     data = [tuple(row) for row in pdf.values]
     log.debug(f"{context}Prepared {len(data)} rows for insertion into '{table_name}'.")
 
+    conn = None
     try:
         conn = get_postgres_connection()
         cur = conn.cursor()
@@ -219,10 +260,13 @@ def bulk_insert_dataframe(pdf, table_name, drop_columns=None, context=""):
         execute_values(cur, insert_sql, data, page_size=1000)
         conn.commit()
         cur.close()
-        release_postgres_connection(conn)
+
         log.info(f"{context}Bulk insert successful: Data saved to table '{table_name}'.")
     except Exception as e:
         log.error(f"{context}Error during bulk insert to table '{table_name}': {e}")
+    finally:
+        if conn:
+            release_postgres_connection(conn)
 
 
 def store_to_rdbms(table_name, df):
