@@ -47,5 +47,13 @@ SPARK_SERIALIZER = os.getenv("SPARK_SERIALIZER", "org.apache.spark.serializer.Kr
 SPARK_KRYO_BUFFER_MAX = os.getenv("SPARK_KRYO_BUFFER_MAX", "256m")
 SPARK_ADAPTIVE_EXECUTION = os.getenv("SPARK_ADAPTIVE_EXECUTION", "true").lower() == "true"
 SPARK_DYNAMIC_SHUFFLE_TRACKING = os.getenv("SPARK_DYNAMIC_SHUFFLE_TRACKING", "true").lower() == "true"
+# Autoscaling configuration for Spark workers
+SPARK_AUTOSCALE = os.getenv("SPARK_AUTOSCALE", "false").lower() == "true"
+SPARK_WORKER_MAX = int(os.getenv("SPARK_WORKER_MAX", "5"))
+SPARK_WORKER_MIN = int(os.getenv("SPARK_WORKER_MIN", "1"))
+SPARK_WORKER_IMAGE = os.getenv("SPARK_WORKER_IMAGE", "bitnami/spark:latest")
+SPARK_WORKER_CONTAINER_PREFIX = os.getenv("SPARK_WORKER_CONTAINER_PREFIX", "spark-worker-")
+SPARK_WORKER_CPU_THRESHOLD = float(os.getenv("SPARK_WORKER_CPU_THRESHOLD", "80"))
+DOCKER_NETWORK = os.getenv("DOCKER_NETWORK", "data_automation-net")
 
 DELTA_PATH = os.getenv("DELTA_PATH", "delta_files")

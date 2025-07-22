@@ -96,6 +96,13 @@ SPARK_SERIALIZER=org.apache.spark.serializer.KryoSerializer
 SPARK_KRYO_BUFFER_MAX=256m
 SPARK_ADAPTIVE_EXECUTION=true
 SPARK_DYNAMIC_SHUFFLE_TRACKING=true
+SPARK_AUTOSCALE=false           # enable Docker based scaling of workers
+SPARK_WORKER_MAX=5              # upper limit for auto-scaled workers
+SPARK_WORKER_MIN=1              # minimum number of workers to maintain
+SPARK_WORKER_IMAGE=bitnami/spark:3.5.6    # version matches used pyspark version
+SPARK_WORKER_CONTAINER_PREFIX=spark-worker-
+SPARK_WORKER_CPU_THRESHOLD=60   # CPU percent usage triggering scale up
+DOCKER_NETWORK=data_automation-net
 
 CHECKPOINT_PATH=/tmp/delta/checkpoints
 ````
@@ -107,6 +114,11 @@ between `SPARK_DYNAMIC_ALLOCATION_MIN_EXECUTORS` and
 with an increased buffer to avoid large task warnings. `SPARK_ADAPTIVE_EXECUTION`
 and `SPARK_DYNAMIC_SHUFFLE_TRACKING` allow Spark to optimize shuffle partitions
 and scale executors dynamically without restarting the application.
+
+When `SPARK_AUTOSCALE` is enabled the application will use the Docker API to
+start additional Spark worker containers when existing workers exceed
+`SPARK_WORKER_CPU_THRESHOLD` percent CPU usage. Workers are named using
+`SPARK_WORKER_CONTAINER_PREFIX` and will not exceed `SPARK_WORKER_MAX`.
 
 When the Kafka backlog exceeds `KAFKA_BACKLOG_THRESHOLD`, messages are drained
 in batches of size `BACKLOG_BATCH_SIZE` until the backlog is cleared.

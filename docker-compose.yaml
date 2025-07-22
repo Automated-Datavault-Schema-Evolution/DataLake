@@ -11,6 +11,7 @@ services:
       - ./:/app
       - ${CHECKPOINT_PATH}:/tmp/delta/checkpoints
       - ${HOST_DATA_DIRECTORY}:/app/data
+      - /var/run/docker.sock:/var/run/docker.sock
     networks:
       - data_automation-net
     environment:
@@ -18,6 +19,32 @@ services:
       - KAFKA_BOOTSTRAP_SERVERS=kafka:9092 #change hardcoded variable, to dynamic from env-file (currently hardcoded, as it would use localhost:9092 in docker)
     restart: unless-stopped
 
+  spark-master:
+    image: ${SPARK_WORKER_IMAGE}
+    container_name: spark-master
+    environment:
+      - SPARK_MODE=master
+      - SPARK_MASTER_PORT=7077
+      - SPARK_MASTER_WEBUI_PORT=8080
+      - KAFKA_BOOTSTRAP_SERVER=kafka:9092
+    networks:
+      - data_automation-net
+    restart: unless-stopped
+
+  spark-worker:
+    image: ${SPARK_WORKER_IMAGE}
+    depends_on:
+      - spark-master
+    environment:
+      - SPARK_MODE=worker
+      - SPARK_MASTER_URL=spark://spark-master:7077
+      - SPARK_WORKER_MEMORY=2G
+      - SPARK_WORKER_CORES=2
+      - SPARK_WORKER_WEBUI_PORT=8081
+      - KAFKA_BOOTSTRAP_SERVER=kafka:9092
+    networks:
+      - data_automation-net
+    restart: unless-stopped
 
 networks:
   data_automation-net:

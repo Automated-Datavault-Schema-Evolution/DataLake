@@ -22,6 +22,7 @@ from utils.kafka_utils import get_kafka_consumer, sanity_check_kafka, get_topic_
 from utils.lake_utils import write_to_delta
 from utils.parse_utils import parse_message_to_row
 from utils.spark_utiils import get_spark_session
+from utils.spark_work_autoscaler import check_and_scale_workers
 
 
 def process_batch(batch_df, epoch_id):
@@ -185,6 +186,7 @@ def main():
         while True:
             try:
                 backlog = get_topic_backlog()
+                check_and_scale_workers()
                 if backlog > 0 and CONSUME_FULL_BACKLOG:
                     log.info(
                         f"Auto consuming backlog of {backlog} messages as CONSUME_FULL_BACKLOG is enabled"
