@@ -1,5 +1,6 @@
 import time
 
+import pandas as pd
 from apscheduler.schedulers.background import BackgroundScheduler
 from logger import log
 from pyspark.sql.types import StructType, StructField, StringType
@@ -11,7 +12,11 @@ from config import (
     SCHEDULE_TYPE,
     SCHEDULE_CRON,
     SCHEDULE_INTERVAL_HOURS,
-    PROCESSING_MODE, KAFKA_STARTING_OFFSETS, KAFKA_GROUP_ID, KAFKA_BACKLOG_THRESHOLD,
+    PROCESSING_MODE,
+    KAFKA_STARTING_OFFSETS,
+    KAFKA_GROUP_ID,
+    KAFKA_BACKLOG_THRESHOLD,
+    BACKLOG_BATCH_SIZE,
 )
 from utils.kafka_utils import get_kafka_consumer, sanity_check_kafka, get_topic_backlog
 from utils.lake_utils import write_to_delta
@@ -19,7 +24,26 @@ from utils.parse_utils import parse_message_to_row
 from utils.spark_utiils import get_spark_session
 
 
-def bulk_ingest(spark):
+def process_batch(batch_df, epoch_id):
+    """Write each micro-batch of the streaming query to Delta Lake."""
+    from pyspark.sql.functions import col
+
+    sample_row = batch_df.select("row").head()
+    log.debug(sample_row)
+    columns = list(sample_row["row"].keys()) if sample_row else []
+    select_cols = [
+                      col("filename"),
+                      col("data_format"),
+                      col("ingestion_timestamp"),
+                  ] + [col("row")[k].alias(k) for k in columns]
+
+    exploded_flat = batch_df.select(*select_cols)
+    if exploded_flat.head(1):
+        write_to_delta(exploded_flat, DELTA_PATH)
+        log.info(f"Streaming batch written, epoch {epoch_id}")
+
+
+def bulk_ingest(spark, max_messages=None):
     log.info("Bulk fallback: draining any buffered records from Kafka…")
     # Use unified consumer group and let Kafka track offsets
     consumer = get_kafka_consumer()
@@ -50,7 +74,11 @@ def bulk_ingest(spark):
                 count += len(parsed_rows)
 
     if rows:
-        df = spark.createDataFrame(rows)
+        pdf = pd.DataFrame(rows)
+        pdf = pdf.where(pd.notnull(pdf), None)
+        pdf = pdf.astype(str)
+        schema = StructType([StructField(col, StringType(), True) for col in pdf.columns])
+        df = spark.createDataFrame(pdf, schema=schema)
         write_to_delta(df, DELTA_PATH)
         log.info(f"Bulk fallback wrote {count} rows to delta-lake")
     else:
@@ -129,28 +157,28 @@ def streaming_ingest(spark):
             explode(col("rows")).alias("row"),
         )
 
-        def process_batch(batch_df, epoch_id):
-            # exploded = batch_df.select(
-            #     col("filename"),
-            #     col("data_format"),
-            #     col("ingestion_timestamp"),
-            #     explode(col("rows")).alias("row"),
-            # )
-            # sample_row = exploded.select("row").head()
-            sample_row = batch_df.select("row").head()
-            log.debug(sample_row)
-            columns = list(sample_row["row"].keys()) if sample_row else []
-            select_cols = [
-                              col("filename"),
-                              col("data_format"),
-                              col("ingestion_timestamp"),
-                          ] + [col("row")[k].alias(k) for k in columns]
-
-            # exploded_flat = exploded.select(*select_cols)
-            exploded_flat = batch_df.select(*select_cols)
-            if exploded_flat.head(1):
-                write_to_delta(exploded_flat, DELTA_PATH)
-                log.info(f"Streaming batch written, epoch {epoch_id}")
+        # def process_batch(batch_df, epoch_id):
+        #     # exploded = batch_df.select(
+        #     #     col("filename"),
+        #     #     col("data_format"),
+        #     #     col("ingestion_timestamp"),
+        #     #     explode(col("rows")).alias("row"),
+        #     # )
+        #     # sample_row = exploded.select("row").head()
+        #     sample_row = batch_df.select("row").head()
+        #     log.debug(sample_row)
+        #     columns = list(sample_row["row"].keys()) if sample_row else []
+        #     select_cols = [
+        #                       col("filename"),
+        #                       col("data_format"),
+        #                       col("ingestion_timestamp"),
+        #                   ] + [col("row")[k].alias(k) for k in columns]
+        #
+        #     # exploded_flat = exploded.select(*select_cols)
+        #     exploded_flat = batch_df.select(*select_cols)
+        #     if exploded_flat.head(1):
+        #         write_to_delta(exploded_flat, DELTA_PATH)
+        #         log.info(f"Streaming batch written, epoch {epoch_id}")
 
         ##(parsed.writeStream.trigger(processingTime="1 second")
         (flattened.writeStream.trigger(processingTime="1 second")
