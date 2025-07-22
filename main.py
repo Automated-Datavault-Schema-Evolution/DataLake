@@ -16,7 +16,7 @@ from config import (
     KAFKA_STARTING_OFFSETS,
     KAFKA_GROUP_ID,
     KAFKA_BACKLOG_THRESHOLD,
-    BACKLOG_BATCH_SIZE,
+    BACKLOG_BATCH_SIZE, CONSUME_FULL_BACKLOG,
 )
 from utils.kafka_utils import get_kafka_consumer, sanity_check_kafka, get_topic_backlog
 from utils.lake_utils import write_to_delta
@@ -118,8 +118,8 @@ def streaming_ingest(spark):
             .option("kafka.bootstrap.servers", KAFKA_BOOTSTRAP_SERVERS)
             .option("subscribe", KAFKA_TOPIC)
             .option("startingOffsets", KAFKA_STARTING_OFFSETS)
-            .option("kafka.group.id", KAFKA_GROUP_ID)
-            .option("kafka.commit.groupOffsets", "true")
+            # .option("kafka.group.id", KAFKA_GROUP_ID)
+            # .option("kafka.commit.groupOffsets", "true")
             .load()
         )
         log.debug(f"Connected to kafka server {KAFKA_BOOTSTRAP_SERVERS} and topic {KAFKA_TOPIC}")
@@ -185,6 +185,20 @@ def main():
         while True:
             try:
                 backlog = get_topic_backlog()
+                if backlog > 0 and CONSUME_FULL_BACKLOG:
+                    log.info(
+                        f"Auto consuming backlog of {backlog} messages as CONSUME_FULL_BACKLOG is enabled"
+                    )
+                    while backlog > 0:
+                        to_drain = min(backlog, BACKLOG_BATCH_SIZE)
+                        log.info(f"Draining {to_drain} messages from backlog (auto mode)")
+                        bulk_ingest(spark, max_messages=to_drain)
+                        backlog = get_topic_backlog()
+                        if backlog > 0:
+                            log.info(f"{backlog} messages remain in backlog")
+                    log.info("Re-checking backlog in 5s…")
+                    time.sleep(5)
+                    continue
                 if backlog > KAFKA_BACKLOG_THRESHOLD:
                     log.warning(
                         f"Kafka backlog {backlog} exceeds threshold {KAFKA_BACKLOG_THRESHOLD}. Using bulk ingestion"

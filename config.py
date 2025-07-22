@@ -16,6 +16,7 @@ KAFKA_GROUP_ID = os.getenv("KAFKA_GROUP_ID", "datalake-stream")
 PROCESSING_MODE = os.getenv("PROCESSING_MODE", "streaming")
 KAFKA_BACKLOG_THRESHOLD = int(os.getenv("KAFKA_BACKLOG_THRESHOLD", "1000"))
 BACKLOG_BATCH_SIZE = int(os.getenv("BACKLOG_BATCH_SIZE", KAFKA_BACKLOG_THRESHOLD))
+CONSUME_FULL_BACKLOG = os.getenv("CONSUME_FULL_BACKLOG", "false").lower() == "true"
 
 SCHEDULE_TYPE = os.getenv("SCHEDULE_TYPE", "interval")
 SCHEDULE_CRON = os.getenv("SCHEDULE_CRON", "0 3 * * *")
