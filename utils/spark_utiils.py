@@ -13,6 +13,12 @@ from config import (
     SPARK_EXECUTOR_CORES,
     SPARK_SQL_SHUFFLE_PARTITIONS,
     SPARK_DYNAMIC_ALLOCATION,
+    SPARK_DYNAMIC_ALLOCATION_MIN_EXECUTORS,
+    SPARK_DYNAMIC_ALLOCATION_MAX_EXECUTORS,
+    SPARK_DYNAMIC_ALLOCATION_INITIAL_EXECUTORS,
+    SPARK_SERIALIZER,
+    SPARK_KRYO_BUFFER_MAX,
+    SPARK_ADAPTIVE_EXECUTION, SPARK_DYNAMIC_SHUFFLE_TRACKING,
 )
 
 
@@ -29,10 +35,19 @@ def get_spark_session(app_name="Kafka_Consumer_Lake_Handler"):
         .config("spark.driver.cores", SPARK_DRIVER_CORES)
         .config("spark.executor.cores", SPARK_EXECUTOR_CORES)
         .config("spark.sql.shuffle.partitions", SPARK_SQL_SHUFFLE_PARTITIONS)
+        .config("spark.serializer", SPARK_SERIALIZER)
+        .config("spark.kryoserializer.buffer.max", SPARK_KRYO_BUFFER_MAX)
+        .config("spark.sql.adaptive.enabled", str(SPARK_ADAPTIVE_EXECUTION).lower())
     )
 
     if SPARK_DYNAMIC_ALLOCATION:
-        builder = builder.config("spark.dynamicAllocation.enabled", "true")
+        builder = (
+            builder.config("spark.dynamicAllocation.enabled", "true")
+            .config("spark.dynamicAllocation.minExecutors", SPARK_DYNAMIC_ALLOCATION_MIN_EXECUTORS)
+            .config("spark.dynamicAllocation.maxExecutors", SPARK_DYNAMIC_ALLOCATION_MAX_EXECUTORS)
+            .config("spark.dynamicAllocation.initialExecutors", SPARK_DYNAMIC_ALLOCATION_INITIAL_EXECUTORS)
+            .config("spark.dynamicAllocation.shuffleTracking.enabled", str(SPARK_DYNAMIC_SHUFFLE_TRACKING).lower())
+        )
 
     # Ensure Spark uses the same Python interpreter for driver and executors
     python_exec = sys.executable
