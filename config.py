@@ -56,3 +56,4 @@ SPARK_WORKER_CPU_THRESHOLD = float(os.getenv("SPARK_WORKER_CPU_THRESHOLD", "80")
 DOCKER_NETWORK = os.getenv("DOCKER_NETWORK", "data_automation-net")
 
 DELTA_PATH = os.getenv("DELTA_PATH", "delta_files")
+CHECKPOINT_PATH = os.getenv("CHECKPOINT_PATH", "./tmp/delta/checkpoints")
