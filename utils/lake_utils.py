@@ -12,7 +12,7 @@ from config import (
     POSTGRES_DB,
     POSTGRES_USER,
     POSTGRES_PASSWORD,
-    LAKE_TYPE, POSTGRES_POOL_MAX,
+    LAKE_TYPE, POSTGRES_POOL_MAX, POSTGRES_POOL_MIN,
 )
 
 # Global connection pool for PostgreSQL
@@ -79,7 +79,7 @@ def init_postgres_pool(minconn=None, maxconn=None):
         """
     global PG_POOL
     if minconn is None:
-        minconn = POSTGRES_POOL_MAX
+        minconn = POSTGRES_POOL_MIN
     if maxconn is None:
         maxconn = POSTGRES_POOL_MAX
     if PG_POOL is None:
