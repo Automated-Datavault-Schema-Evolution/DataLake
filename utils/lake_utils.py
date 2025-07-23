@@ -275,7 +275,16 @@ def store_to_rdbms(table_name, df):
     """
     try:
         pdf = df.toPandas()
-        log.debug(f"Converted Spark DataFrame to Pandas for table '{table_name}', shape: {pdf.shape}")
+        """
+        Pandas may create a fragmented DataFrame when columns are added
+        incrementally. Copying the DataFrame ensures it is contiguous and
+        avoids "DataFrame is highly fragmented" performance warnings during
+        insert operations.
+        """
+        pdf = pdf.copy()
+        log.debug(
+            f"Converted Spark DataFrame to Pandas for table '{table_name}', shape: {pdf.shape}"
+        )
         bulk_insert_dataframe(pdf, table_name, context=f"store_to_rdbms for '{table_name}': ")
     except Exception as e:
         log.error(f"Error in store_to_rdbms for table '{table_name}': {e}")
