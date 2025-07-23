@@ -1,3 +1,6 @@
+import atexit
+import signal
+import sys
 import time
 
 import pandas as pd
@@ -22,7 +25,7 @@ from utils.kafka_utils import get_kafka_consumer, sanity_check_kafka, get_topic_
 from utils.lake_utils import write_to_delta
 from utils.parse_utils import parse_message_to_row
 from utils.spark_utiils import get_spark_session
-from utils.spark_work_autoscaler import check_and_scale_workers
+from utils.spark_work_autoscaler import check_and_scale_workers, cleanup_workers
 
 
 def process_batch(batch_df, epoch_id):
@@ -169,6 +172,7 @@ def streaming_ingest(spark):
     except Exception as e:
         log.critical(f"STREAMING FAILURE: {e} — switching to bulk ingestion", exc_info=True)
         bulk_ingest(spark)
+        raise
 
 
 def schedule_bulk(spark):
@@ -249,4 +253,14 @@ def main():
 
 
 if __name__ == "__main__":
+    def _shutdown_handler(signum=None, frame=None):
+        log.info("Application stopping, cleaning up Spark workers")
+        cleanup_workers()
+        if signum is not None:
+            sys.exit(0)
+
+
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        signal.signal(sig, _shutdown_handler)
+    atexit.register(cleanup_workers)
     main()
