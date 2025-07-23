@@ -16,9 +16,9 @@ from config import (
     KAFKA_STARTING_OFFSETS,
     KAFKA_GROUP_ID,
     KAFKA_BACKLOG_THRESHOLD,
-    BACKLOG_BATCH_SIZE, CONSUME_FULL_BACKLOG,
+    BACKLOG_BATCH_SIZE,
 )
-from utils.kafka_utils import get_kafka_consumer, sanity_check_kafka, get_topic_backlog
+from utils.kafka_utils import get_kafka_consumer, sanity_check_kafka, get_topic_backlog, commit_consumer_offsets
 from utils.lake_utils import write_to_delta
 from utils.parse_utils import parse_message_to_row
 from utils.spark_utiils import get_spark_session
@@ -187,9 +187,11 @@ def main():
             try:
                 backlog = get_topic_backlog()
                 check_and_scale_workers()
-                if backlog > 0 and CONSUME_FULL_BACKLOG:
+                # if backlog > 0 and CONSUME_FULL_BACKLOG: # always consume the backlog
+                if backlog > 0:  #
                     log.info(
-                        f"Auto consuming backlog of {backlog} messages as CONSUME_FULL_BACKLOG is enabled"
+                        # f"Auto consuming backlog of {backlog} messages as CONSUME_FULL_BACKLOG is enabled"
+                        f"Auto consuming backlog of {backlog} messages"
                     )
                     while backlog > 0:
                         to_drain = min(backlog, BACKLOG_BATCH_SIZE)

@@ -71,7 +71,6 @@ KAFKA_STARTING_OFFSETS=earliest   # 'earliest' to read all messages
 KAFKA_GROUP_ID=datalake-stream
 KAFKA_BACKLOG_THRESHOLD=1000     # switch to bulk mode if backlog exceeds this
 BACKLOG_BATCH_SIZE=500          # messages drained per backlog batch
-CONSUME_FULL_BACKLOG=false      # consume backlog even when below threshold
 
 PROCESSING_MODE=streaming   # options: streaming or bulk
 
@@ -122,7 +121,7 @@ start additional Spark worker containers when existing workers exceed
 
 When the Kafka backlog exceeds `KAFKA_BACKLOG_THRESHOLD`, messages are drained
 in batches of size `BACKLOG_BATCH_SIZE` until the backlog is cleared.
-`CONSUME_FULL_BACKLOG` forces the service to drain the backlog completely even if it is below the threshold.
+If the application recognizes a backlog, then the whole backlog will be drained.
 
 Database settings if using the RDBMS mode
 Below is a brief description of the most important variables:
