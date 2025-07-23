@@ -30,6 +30,7 @@ services:
     ports:
       - "7077:7077"
       - "8080:8080"
+      - "4040:4040"
     networks:
       - data_automation-net
     restart: unless-stopped
