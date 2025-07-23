@@ -18,8 +18,7 @@ from config import (
     PROCESSING_MODE,
     KAFKA_STARTING_OFFSETS,
     KAFKA_GROUP_ID,
-    KAFKA_BACKLOG_THRESHOLD,
-    BACKLOG_BATCH_SIZE,
+    BACKLOG_BATCH_SIZE, CHECKPOINT_PATH,
 )
 from utils.kafka_utils import get_kafka_consumer, sanity_check_kafka, get_topic_backlog, commit_consumer_offsets
 from utils.lake_utils import write_to_delta
@@ -162,12 +161,14 @@ def streaming_ingest(spark):
             explode(col("rows")).alias("row"),
         )
 
-        (flattened.writeStream.trigger(processingTime="1 second")
-         .foreachBatch(process_batch) \
-         .outputMode("append") \
-         .option("checkpointLocation", "/tmp/delta/checkpoints/streaming/") \
-         .start() \
-         .awaitTermination())
+        query = (
+            flattened.writeStream.trigger(processingTime="1 second")
+            .foreachBatch(process_batch)
+            .outputMode("append")
+            .option("checkpointLocation", CHECKPOINT_PATH)
+            .start()
+        )
+        return query
 
     except Exception as e:
         log.critical(f"STREAMING FAILURE: {e} — switching to bulk ingestion", exc_info=True)
@@ -195,45 +196,34 @@ def schedule_bulk(spark):
 def main():
     log.info("Starting Delta Lake Handler.")
 
-    sanity_check_kafka()
     spark = get_spark_session()
+    sanity_check_kafka()
 
     if PROCESSING_MODE == 'streaming':
         while True:
+            backlog = get_topic_backlog()
+            check_and_scale_workers()
+            if backlog > 0:
+                log.info(
+                    f"Auto consuming backlog of {backlog} messages"
+                )
+                while backlog > 0:
+                    to_drain = min(backlog, BACKLOG_BATCH_SIZE)
+                    log.info(f"Draining {to_drain} messages from backlog (auto mode)")
+                    bulk_ingest(spark, max_messages=to_drain)
+                    backlog = get_topic_backlog()
+                    if backlog > 0:
+                        log.info(f"{backlog} messages remain in backlog")
+                log.info("Re-checking backlog in 5s…")
+                time.sleep(5)
+                continue
+            else:
+                break
+        while True:
             try:
-                backlog = get_topic_backlog()
-                check_and_scale_workers()
-                # if backlog > 0 and CONSUME_FULL_BACKLOG: # always consume the backlog
-                if backlog > 0:  #
-                    log.info(
-                        # f"Auto consuming backlog of {backlog} messages as CONSUME_FULL_BACKLOG is enabled"
-                        f"Auto consuming backlog of {backlog} messages"
-                    )
-                    while backlog > 0:
-                        to_drain = min(backlog, BACKLOG_BATCH_SIZE)
-                        log.info(f"Draining {to_drain} messages from backlog (auto mode)")
-                        bulk_ingest(spark, max_messages=to_drain)
-                        backlog = get_topic_backlog()
-                        if backlog > 0:
-                            log.info(f"{backlog} messages remain in backlog")
-                    log.info("Re-checking backlog in 5s…")
-                    time.sleep(5)
-                    continue
-                if backlog > KAFKA_BACKLOG_THRESHOLD:
-                    log.warning(
-                        f"Kafka backlog {backlog} exceeds threshold {KAFKA_BACKLOG_THRESHOLD}. Using bulk ingestion"
-                    )
-                    while backlog > 0:
-                        to_drain = min(backlog, BACKLOG_BATCH_SIZE)
-                        log.info(f"Draining {to_drain} messages from backlog")
-                        bulk_ingest(spark, max_messages=to_drain)
-                        backlog = get_topic_backlog()
-                        if backlog > 0:
-                            log.info(f"{backlog} messages remain in backlog")
-                    log.info("Re-checking backlog in 5s…")
-                    time.sleep(5)
-                    continue
-                streaming_ingest(spark)
+                query = streaming_ingest(spark)  # Should return the query object
+                log.info("Streaming ingestion started. Awaiting termination...")
+                query.awaitTermination()
             except Exception:
                 log.error(
                     "STREAMING FAILED – falling back to bulk drain", exc_info=True
