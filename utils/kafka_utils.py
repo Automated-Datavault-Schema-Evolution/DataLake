@@ -3,7 +3,7 @@ import json
 from kafka import KafkaConsumer, errors as kafka_errors
 from kafka.admin import KafkaAdminClient
 from kafka.errors import TopicAlreadyExistsError
-from kafka.structs import TopicPartition
+from kafka.structs import TopicPartition, OffsetAndMetadata
 from logger import log
 
 from config import KAFKA_BOOTSTRAP_SERVERS, KAFKA_TOPIC, KAFKA_GROUP_ID
@@ -121,5 +121,32 @@ def get_topic_backlog(group_id=None):
     finally:
         if consumer:
             consumer.close()
+        if admin:
+            admin.close()
+
+
+def commit_consumer_offsets(offsets):
+    """Commit the given offsets for ``KAFKA_GROUP_ID`` using the Admin API.
+
+    Parameters
+    ----------
+    offsets: Dict[int, int]
+        Mapping from partition to the latest processed offset in that partition.
+    """
+    if not offsets:
+        return
+
+    admin = None
+    try:
+        admin = KafkaAdminClient(bootstrap_servers=KAFKA_BOOTSTRAP_SERVERS)
+        records = {
+            TopicPartition(KAFKA_TOPIC, p): OffsetAndMetadata(o + 1, None)
+            for p, o in offsets.items()
+        }
+        admin.alter_consumer_group_offsets(KAFKA_GROUP_ID, records)
+        log.debug(f"[Kafka] Committed offsets: {records}")
+    except Exception as exc:  # pragma: no cover - runtime safety
+        log.error(f"[Kafka] Failed to commit offsets {offsets}: {exc}")
+    finally:
         if admin:
             admin.close()

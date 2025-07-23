@@ -26,8 +26,8 @@ from utils.spark_work_autoscaler import check_and_scale_workers
 
 
 def process_batch(batch_df, epoch_id):
-    """Write each micro-batch of the streaming query to Delta Lake."""
-    from pyspark.sql.functions import col
+    """Write each micro-batch of the streaming query to Delta Lake and commit offsets."""
+    from pyspark.sql.functions import col, max as spark_max
 
     sample_row = batch_df.select("row").head()
     log.debug(sample_row)
@@ -42,6 +42,14 @@ def process_batch(batch_df, epoch_id):
     if exploded_flat.head(1):
         write_to_delta(exploded_flat, DELTA_PATH)
         log.info(f"Streaming batch written, epoch {epoch_id}")
+
+    # Commit consumed offsets so backlog calculation reflects progress
+    try:
+        offsets_df = batch_df.groupBy("partition").agg(spark_max("offset").alias("offset"))
+        offsets = {int(r["partition"]): int(r["offset"]) for r in offsets_df.collect()}
+        commit_consumer_offsets(offsets)
+    except Exception as exc:  # pragma: no cover - runtime safety
+        log.error(f"Failed to commit offsets for epoch {epoch_id}: {exc}")
 
 
 def bulk_ingest(spark, max_messages=None):
@@ -119,19 +127,21 @@ def streaming_ingest(spark):
             .option("kafka.bootstrap.servers", KAFKA_BOOTSTRAP_SERVERS)
             .option("subscribe", KAFKA_TOPIC)
             .option("startingOffsets", KAFKA_STARTING_OFFSETS)
-            # .option("kafka.group.id", KAFKA_GROUP_ID)
+            .option("kafka.group.id", KAFKA_GROUP_ID)
             # .option("kafka.commit.groupOffsets", "true")
             .load()
         )
         log.debug(f"Connected to kafka server {KAFKA_BOOTSTRAP_SERVERS} and topic {KAFKA_TOPIC}")
 
         parsed = (
-            df.selectExpr("CAST(value AS STRING) as json_value")
-            .select(from_json(col("json_value"), schema).alias("data"))
-            .select("data.*")
+            df.selectExpr("partition", "offset", "CAST(value AS STRING) as json_value")
+            .select("partition", "offset", from_json(col("json_value"), schema).alias("data"))
+            .select("partition", "offset", "data.*")
         )
 
         parsed_with_ts = parsed.select(
+            "partition",
+            "offset",
             "filename",
             "data_format",
             "ingestion_timestamp",
@@ -141,6 +151,8 @@ def streaming_ingest(spark):
         )
 
         flattened = parsed_with_ts.select(
+            "partition",
+            "offset",
             "filename",
             "data_format",
             "ingestion_timestamp",
