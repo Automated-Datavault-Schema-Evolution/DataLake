@@ -32,7 +32,7 @@ def process_batch(batch_df, epoch_id):
     from pyspark.sql.functions import col, max as spark_max
 
     sample_row = batch_df.select("row").head()
-    log.debug(sample_row)
+
     columns = list(sample_row["row"].keys()) if sample_row else []
     select_cols = [
                       col("filename"),
@@ -56,8 +56,12 @@ def process_batch(batch_df, epoch_id):
 
 def bulk_ingest(spark, max_messages=None):
     log.info("Bulk fallback: draining any buffered records from Kafka…")
-    # Use unified consumer group and let Kafka track offsets
-    consumer = get_kafka_consumer()
+    try:
+        consumer = get_kafka_consumer()
+        log.info(f"Kafka consumer created with servers: {KAFKA_BOOTSTRAP_SERVERS}")
+    except Exception as e:
+        log.error(f"Failed to create Kafka consumer: {e}")
+        return
 
     rows = []
     count = 0
@@ -68,9 +72,15 @@ def bulk_ingest(spark, max_messages=None):
         if max_messages is not None:
             remaining = max_messages - count
             max_records = min(max_records, remaining)
-        batch = consumer.poll(timeout_ms=1000, max_records=max_records)
+        try:
+            log.debug(f"Polling Kafka (max_records={max_records})...")
+            batch = consumer.poll(timeout_ms=1000, max_records=max_records)
+        except Exception as e:
+            log.error(f"Error polling Kafka: {e}")
+            break
         if not batch:
             empty_polls += 1
+            log.debug(f"No messages polled. Empty polls so far: {empty_polls}")
             continue
         empty_polls = 0
         for tp, messages in batch.items():
@@ -101,9 +111,11 @@ def bulk_ingest(spark, max_messages=None):
         log.debug("Bulk fallback committed offsets")
     except Exception as e:
         log.error(f"Failed to commit offsets after bulk ingestion: {e}")
-    # Log updated backlog after draining
-    backlog = get_topic_backlog()
-    log.info(f"Backlog after bulk ingestion: {backlog} messages")
+    try:
+        backlog = get_topic_backlog()
+        log.info(f"Backlog after bulk ingestion: {backlog} messages")
+    except Exception as e:
+        log.error(f"Failed to get topic backlog: {e}")
 
     consumer.close()
     log.debug("Bulk fallback Kafka consumer closed")
