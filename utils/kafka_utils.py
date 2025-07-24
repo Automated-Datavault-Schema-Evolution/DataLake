@@ -1,12 +1,13 @@
 import json
+from pathlib import Path
 
 from kafka import KafkaConsumer, errors as kafka_errors
 from kafka.admin import KafkaAdminClient
 from kafka.errors import TopicAlreadyExistsError
-from kafka.structs import TopicPartition, OffsetAndMetadata
+from kafka.structs import TopicPartition
 from logger import log
 
-from config import KAFKA_BOOTSTRAP_SERVERS, KAFKA_TOPIC, KAFKA_GROUP_ID
+from config import KAFKA_BOOTSTRAP_SERVERS, KAFKA_TOPIC, KAFKA_GROUP_ID, STREAMING_CHECKPOINT_PATH
 
 
 def get_kafka_consumer(group_id=None):
@@ -82,6 +83,54 @@ def create_topic_if_not_exists(topic, num_partitions=3, replication_factor=1):
         log.debug("[Kafka] Admin client closed")
 
 
+def _extract_partition_offsets(obj):
+    """Recursively search ``obj`` for partition offset mappings."""
+    if isinstance(obj, dict):
+        if all(isinstance(k, str) and k.isdigit() for k in obj.keys()):
+            try:
+                return {int(k): int(obj[k]) for k in obj}
+            except Exception:
+                return {}
+        if KAFKA_TOPIC in obj:
+            res = _extract_partition_offsets(obj[KAFKA_TOPIC])
+            if res:
+                return res
+        for v in obj.values():
+            res = _extract_partition_offsets(v)
+            if res:
+                return res
+    elif isinstance(obj, str):
+        try:
+            data = json.loads(obj)
+            return _extract_partition_offsets(data)
+        except Exception:
+            return {}
+    return {}
+
+
+def _read_checkpoint_offsets():
+    """Load latest processed offsets from the streaming checkpoint."""
+    offsets_dir = Path(STREAMING_CHECKPOINT_PATH) / "commits"
+    if not offsets_dir.exists():
+        return {}
+    files = sorted(offsets_dir.glob("*.json"))
+    if not files:
+        return {}
+    latest = files[-1]
+    try:
+        with open(latest) as fh:
+            data = json.load(fh)
+        sources = data.get("sources") or []
+        for src in sources:
+            if "Kafka" in src.get("description", ""):
+                end_offset = src.get("endOffset") or src.get("endOffsets")
+                if end_offset is not None:
+                    return _extract_partition_offsets(end_offset)
+    except Exception as exc:  # pragma: no cover - runtime safety
+        log.error(f"[Kafka] Failed to read checkpoint offsets: {exc}")
+    return {}
+
+
 def get_topic_backlog(group_id=None):
     """Return the number of messages not yet consumed for the given group.
 
@@ -103,14 +152,11 @@ def get_topic_backlog(group_id=None):
         tps = [TopicPartition(KAFKA_TOPIC, p) for p in partitions]
         end_offsets = consumer.end_offsets(tps)
 
-        group_offsets = admin.list_consumer_group_offsets(group_id, partitions=tps)
+        cp_offsets = _read_checkpoint_offsets()
 
         backlog = 0
         for tp in tps:
-            committed = 0
-            meta = group_offsets.get(tp)
-            if meta is not None:
-                committed = meta.offset
+            committed = cp_offsets.get(tp.partition, 0)
             backlog += end_offsets.get(tp, 0) - committed
 
         log.info(f"[Kafka] Calculated backlog: {backlog} messages")
@@ -121,32 +167,5 @@ def get_topic_backlog(group_id=None):
     finally:
         if consumer:
             consumer.close()
-        if admin:
-            admin.close()
-
-
-def commit_consumer_offsets(offsets):
-    """Commit the given offsets for ``KAFKA_GROUP_ID`` using the Admin API.
-
-    Parameters
-    ----------
-    offsets: Dict[int, int]
-        Mapping from partition to the latest processed offset in that partition.
-    """
-    if not offsets:
-        return
-
-    admin = None
-    try:
-        admin = KafkaAdminClient(bootstrap_servers=KAFKA_BOOTSTRAP_SERVERS)
-        records = {
-            TopicPartition(KAFKA_TOPIC, p): OffsetAndMetadata(o + 1, None)
-            for p, o in offsets.items()
-        }
-        admin.alter_consumer_group_offsets(KAFKA_GROUP_ID, records)
-        log.debug(f"[Kafka] Committed offsets: {records}")
-    except Exception as exc:  # pragma: no cover - runtime safety
-        log.error(f"[Kafka] Failed to commit offsets {offsets}: {exc}")
-    finally:
         if admin:
             admin.close()

@@ -20,7 +20,7 @@ from config import (
     KAFKA_GROUP_ID,
     BACKLOG_BATCH_SIZE, CHECKPOINT_PATH,
 )
-from utils.kafka_utils import get_kafka_consumer, sanity_check_kafka, get_topic_backlog, commit_consumer_offsets
+from utils.kafka_utils import get_kafka_consumer, sanity_check_kafka, get_topic_backlog
 from utils.lake_utils import write_to_delta
 from utils.parse_utils import parse_message_to_row
 from utils.spark_utiils import get_spark_session
@@ -28,8 +28,8 @@ from utils.spark_work_autoscaler import check_and_scale_workers, cleanup_workers
 
 
 def process_batch(batch_df, epoch_id):
-    """Write each micro-batch of the streaming query to Delta Lake and commit offsets."""
-    from pyspark.sql.functions import col, max as spark_max
+    """Write each micro-batch of the streaming query to Delta Lake."""
+    from pyspark.sql.functions import col
 
     sample_row = batch_df.select("row").head()
 
@@ -44,14 +44,6 @@ def process_batch(batch_df, epoch_id):
     if exploded_flat.head(1):
         write_to_delta(exploded_flat, DELTA_PATH)
         log.info(f"Streaming batch written, epoch {epoch_id}")
-
-    # Commit consumed offsets so backlog calculation reflects progress
-    try:
-        offsets_df = batch_df.groupBy("partition").agg(spark_max("offset").alias("offset"))
-        offsets = {int(r["partition"]): int(r["offset"]) for r in offsets_df.collect()}
-        commit_consumer_offsets(offsets)
-    except Exception as exc:  # pragma: no cover - runtime safety
-        log.error(f"Failed to commit offsets for epoch {epoch_id}: {exc}")
 
 
 def bulk_ingest(spark, max_messages=None):

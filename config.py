@@ -57,3 +57,4 @@ DOCKER_NETWORK = os.getenv("DOCKER_NETWORK", "data_automation-net")
 
 DELTA_PATH = os.getenv("DELTA_PATH", "delta_files")
 CHECKPOINT_PATH = os.getenv("CHECKPOINT_PATH", "./tmp/delta/checkpoints")
+STREAMING_CHECKPOINT_PATH = os.path.join(CHECKPOINT_PATH, "streaming")
