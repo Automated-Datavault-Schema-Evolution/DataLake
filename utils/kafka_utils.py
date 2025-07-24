@@ -1,5 +1,4 @@
 import json
-from pathlib import Path
 
 from kafka import KafkaConsumer, errors as kafka_errors
 from kafka.admin import KafkaAdminClient
@@ -7,7 +6,7 @@ from kafka.errors import TopicAlreadyExistsError
 from kafka.structs import TopicPartition
 from logger import log
 
-from config import KAFKA_BOOTSTRAP_SERVERS, KAFKA_TOPIC, KAFKA_GROUP_ID, STREAMING_CHECKPOINT_PATH
+from config import KAFKA_BOOTSTRAP_SERVERS, KAFKA_TOPIC, KAFKA_GROUP_ID
 
 
 def get_kafka_consumer(group_id=None):
@@ -83,54 +82,6 @@ def create_topic_if_not_exists(topic, num_partitions=3, replication_factor=1):
         log.debug("[Kafka] Admin client closed")
 
 
-def _extract_partition_offsets(obj):
-    """Recursively search ``obj`` for partition offset mappings."""
-    if isinstance(obj, dict):
-        if all(isinstance(k, str) and k.isdigit() for k in obj.keys()):
-            try:
-                return {int(k): int(obj[k]) for k in obj}
-            except Exception:
-                return {}
-        if KAFKA_TOPIC in obj:
-            res = _extract_partition_offsets(obj[KAFKA_TOPIC])
-            if res:
-                return res
-        for v in obj.values():
-            res = _extract_partition_offsets(v)
-            if res:
-                return res
-    elif isinstance(obj, str):
-        try:
-            data = json.loads(obj)
-            return _extract_partition_offsets(data)
-        except Exception:
-            return {}
-    return {}
-
-
-def _read_checkpoint_offsets():
-    """Load latest processed offsets from the streaming checkpoint."""
-    offsets_dir = Path(STREAMING_CHECKPOINT_PATH) / "commits"
-    if not offsets_dir.exists():
-        return {}
-    files = sorted(offsets_dir.glob("*.json"))
-    if not files:
-        return {}
-    latest = files[-1]
-    try:
-        with open(latest) as fh:
-            data = json.load(fh)
-        sources = data.get("sources") or []
-        for src in sources:
-            if "Kafka" in src.get("description", ""):
-                end_offset = src.get("endOffset") or src.get("endOffsets")
-                if end_offset is not None:
-                    return _extract_partition_offsets(end_offset)
-    except Exception as exc:  # pragma: no cover - runtime safety
-        log.error(f"[Kafka] Failed to read checkpoint offsets: {exc}")
-    return {}
-
-
 def get_topic_backlog(group_id=None):
     """Return the number of messages not yet consumed for the given group.
 
@@ -143,7 +94,7 @@ def get_topic_backlog(group_id=None):
             group_id = KAFKA_GROUP_ID
 
         admin = KafkaAdminClient(bootstrap_servers=KAFKA_BOOTSTRAP_SERVERS)
-        consumer = KafkaConsumer(bootstrap_servers=KAFKA_BOOTSTRAP_SERVERS)
+        consumer = KafkaConsumer(bootstrap_servers=KAFKA_BOOTSTRAP_SERVERS, group_id=KAFKA_GROUP_ID)
 
         partitions = consumer.partitions_for_topic(KAFKA_TOPIC)
         if not partitions:
@@ -152,11 +103,10 @@ def get_topic_backlog(group_id=None):
         tps = [TopicPartition(KAFKA_TOPIC, p) for p in partitions]
         end_offsets = consumer.end_offsets(tps)
 
-        cp_offsets = _read_checkpoint_offsets()
-
+        committed_offsets = {tp.partition: consumer.committed(tp) or 0 for tp in tps}
         backlog = 0
         for tp in tps:
-            committed = cp_offsets.get(tp.partition, 0)
+            committed = committed_offsets.get(tp.partition, 0)
             backlog += end_offsets.get(tp, 0) - committed
 
         log.info(f"[Kafka] Calculated backlog: {backlog} messages")
