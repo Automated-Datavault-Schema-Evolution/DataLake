@@ -55,7 +55,7 @@ docker compose up --build
 ```
 
 A `.env.docker` file must be present with the environment variables described below.
-For local development you can create an `.env` file instead. Database credentials
+For local development you can create an `.env.local` file instead. Database credentials
 may also be supplied in `postgres/db.env`, which is loaded automatically if present.
 
 ### Environment Variables

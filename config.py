@@ -2,8 +2,10 @@ import os
 
 from dotenv import load_dotenv
 
+env_type = os.getenv('ENV_TYPE', "local")
+load_dotenv(f".env.{env_type}")
+
 # Load environment variables from .env file
-load_dotenv(dotenv_path=".env")
 load_dotenv(dotenv_path="postgres/db.env")
 
 # Configuration variables
@@ -14,8 +16,8 @@ KAFKA_TOPIC = os.getenv("KAFKA_TOPIC", "csv_deltas")
 KAFKA_STARTING_OFFSETS = os.getenv("KAFKA_STARTING_OFFSETS", "earliest")
 KAFKA_GROUP_ID = os.getenv("KAFKA_GROUP_ID", "datalake-stream")
 PROCESSING_MODE = os.getenv("PROCESSING_MODE", "streaming")
-KAFKA_BACKLOG_THRESHOLD = int(os.getenv("KAFKA_BACKLOG_THRESHOLD", "1000"))
-BACKLOG_BATCH_SIZE = int(os.getenv("BACKLOG_BATCH_SIZE", KAFKA_BACKLOG_THRESHOLD))
+# KAFKA_BACKLOG_THRESHOLD = int(os.getenv("KAFKA_BACKLOG_THRESHOLD", "1000"))
+BACKLOG_BATCH_SIZE = int(os.getenv("BACKLOG_BATCH_SIZE", 500))
 
 SCHEDULE_TYPE = os.getenv("SCHEDULE_TYPE", "interval")
 SCHEDULE_CRON = os.getenv("SCHEDULE_CRON", "0 3 * * *")
@@ -29,12 +31,12 @@ POSTGRES_PASSWORD = os.getenv("POSTGRES_PASSWORD")
 POSTGRES_POOL_MIN = int(os.getenv("POSTGRES_POOL_MIN", "1"))
 POSTGRES_POOL_MAX = int(os.getenv("POSTGRES_POOL_MAX", "5"))
 
-SPARK_MASTER = os.getenv("SPARK_MASTER", "spark://spark-master:7077")
+SPARK_MASTER = os.getenv("SPARK_MASTER", "spark://localhost:7077")
 # Spark resource tuning parameters
-SPARK_DRIVER_MEMORY = os.getenv("SPARK_DRIVER_MEMORY", "2g")
-SPARK_EXECUTOR_MEMORY = os.getenv("SPARK_EXECUTOR_MEMORY", "2g")
-SPARK_DRIVER_CORES = os.getenv("SPARK_DRIVER_CORES", "1")
-SPARK_EXECUTOR_CORES = os.getenv("SPARK_EXECUTOR_CORES", "1")
+SPARK_DRIVER_MEMORY = os.getenv("SPARK_DRIVER_MEMORY", "4g")
+SPARK_EXECUTOR_MEMORY = os.getenv("SPARK_EXECUTOR_MEMORY", "4g")
+SPARK_DRIVER_CORES = os.getenv("SPARK_DRIVER_CORES", "2")
+SPARK_EXECUTOR_CORES = os.getenv("SPARK_EXECUTOR_CORES", "2")
 SPARK_SQL_SHUFFLE_PARTITIONS = int(os.getenv("SPARK_SQL_SHUFFLE_PARTITIONS", "200"))
 SPARK_DYNAMIC_ALLOCATION = os.getenv("SPARK_DYNAMIC_ALLOCATION", "false").lower() == "true"
 # Optional dynamic allocation parameters
@@ -58,3 +60,6 @@ DOCKER_NETWORK = os.getenv("DOCKER_NETWORK", "data_automation-net")
 DELTA_PATH = os.getenv("DELTA_PATH", "delta_files")
 CHECKPOINT_PATH = os.getenv("CHECKPOINT_PATH", "./tmp/delta/checkpoints")
 STREAMING_CHECKPOINT_PATH = os.path.join(CHECKPOINT_PATH, "streaming")
+
+# For dbt
+DBT_PROFILES_DIR = os.path.join(os.path.dirname(__file__), "profiles")
