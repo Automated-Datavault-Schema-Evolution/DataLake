@@ -58,6 +58,63 @@ def write_to_delta(df, delta_path, partition_by=None):
     # If configured, also store in RDBMS with table name from filename
     if LAKE_TYPE == "rdbms" and table_name is not None:
         store_to_rdbms(table_name, df)
+"""
+
+
+def write_to_delta(df, delta_path, partition_by=None):
+    """Write rows from a Spark DataFrame to Delta files and optionally Postgres.
+
+    When Spark batches combine several Kafka messages the resulting DataFrame may
+    contain rows for multiple source files. To avoid mixing their schemas, the
+    data is grouped by ``filename`` and each group is written separately.  If the
+    DataFrame only contains one filename the grouping step is skipped for
+    efficiency.
+    """
+
+    spark = df.sparkSession
+
+    def _write_single(sub_df, filename):
+        table_name = None
+        target_path = delta_path
+        if filename is not None:
+            table_name = os.path.splitext(os.path.basename(filename))[0].replace(".", "_").replace("-", "_")
+            target_path = os.path.join(delta_path, table_name)
+
+        if "data_format" in sub_df.columns:
+            sub_df = sub_df.drop("data_format")
+        drop_cols = [c for c in ["source_filename", "source_data_format"] if c in sub_df.columns]
+        if drop_cols:
+            sub_df = sub_df.drop(*drop_cols)
+
+        if LAKE_TYPE != "rdbms":
+            try:
+                if partition_by and partition_by in sub_df.columns:
+                    sub_df.write.format("delta").mode("append").partitionBy(partition_by).save(target_path)
+                else:
+                    sub_df.write.format("delta").mode("append").save(target_path)
+                log.info(f"Written batch to Delta Lake at {target_path}")
+            except AnalysisException as e:
+                log.error(f"Delta Lake AnalysisException: {e}")
+            except Exception as e:
+                log.error(f"Error saving Delta file {target_path}: {e}")
+
+        if LAKE_TYPE == "rdbms" and table_name is not None:
+            store_to_rdbms(table_name, sub_df)
+
+    if "filename" in df.columns:
+        filenames = df.select("filename").distinct()
+        if filenames.count() == 1:
+            fname = filenames.first()["filename"]
+            _write_single(df.drop("filename"), fname)
+        else:
+            aggregated = df.groupBy("filename").agg(
+                functions.collect_list(functions.struct(*[c for c in df.columns if c != "filename"])).alias("rows")
+            )
+            for row in aggregated.collect():
+                subset = spark.createDataFrame(row["rows"])
+                _write_single(subset, row["filename"])
+    else:
+        _write_single(df, None)
 
 
 def write_to_parquet(spark_df, output_path, mode='append', partition_by=None):
