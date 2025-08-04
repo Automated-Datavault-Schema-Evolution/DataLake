@@ -31,5 +31,8 @@ RUN --mount=type=ssh pip install -r requirements.txt
 # ENV PATH=$SPARK_HOME/bin:$PATH
 
 COPY . /app
+COPY .env.docker /app/.env.docker
+
+ENV ENV_TYPE=docker
 
 CMD ["python", "main.py"]
