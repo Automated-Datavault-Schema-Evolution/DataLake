@@ -80,11 +80,11 @@ SCHEDULE_INTERVAL_HOURS=4   # Used if SCHEDULE_TYPE=interval
 DELTA_PATH=delta_files         # path where Delta tables are stored
 
 
-SPARK_MASTER=spark://spark-master:7077
-SPARK_DRIVER_MEMORY=2g      # Spark driver JVM memory
-SPARK_EXECUTOR_MEMORY=2g    # Executor JVM memory per worker
-SPARK_DRIVER_CORES=1        # Cores for the driver
-SPARK_EXECUTOR_CORES=1      # Cores per executor
+SPARK_MASTER=spark://datalake-ingestion-spark-master:7077
+SPARK_DRIVER_MEMORY=3g      # Spark driver JVM memory
+SPARK_EXECUTOR_MEMORY=3g    # Executor JVM memory per worker
+SPARK_DRIVER_CORES=2        # Cores for the driver
+SPARK_EXECUTOR_CORES=2      # Cores per executor
 SPARK_SQL_SHUFFLE_PARTITIONS=200
 SPARK_DYNAMIC_ALLOCATION=false
 SPARK_DYNAMIC_ALLOCATION_MIN_EXECUTORS=1
