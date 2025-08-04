@@ -69,7 +69,6 @@ KAFKA_BOOTSTRAP_SERVERS=kafka:9092
 KAFKA_TOPIC=csv_deltas
 KAFKA_STARTING_OFFSETS=earliest   # 'earliest' to read all messages
 KAFKA_GROUP_ID=datalake-stream
-KAFKA_BACKLOG_THRESHOLD=1000     # switch to bulk mode if backlog exceeds this
 BACKLOG_BATCH_SIZE=500          # messages drained per backlog batch
 
 PROCESSING_MODE=streaming   # options: streaming or bulk
