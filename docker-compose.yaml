@@ -14,7 +14,7 @@ services:
       - ${HOST_DATA_DIRECTORY}:/app/data
       - /var/run/docker.sock:/var/run/docker.sock
     networks:
-      - data_automation-net
+      - data-automation-net
     environment:
       - SSH_AUTH_SOCK=/ssh-agent
       - KAFKA_BOOTSTRAP_SERVERS=kafka:9092 #change hardcoded variable, to dynamic from env-file (currently hardcoded, as it would use localhost:9092 in docker)
@@ -34,7 +34,7 @@ services:
       - "8080:8080"
       - "4040:4040"
     networks:
-      - data_automation-net
+      - data-automation-net
     restart: unless-stopped
 
   datalake-ingestion-spark-worker-1:
@@ -51,7 +51,7 @@ services:
     ports:
       - "8082:8082"
     networks:
-      - data_automation-net
+      - data-automation-net
 
   datalake-ingestion-spark-worker-2:
     image: ${SPARK_WORKER_IMAGE}
@@ -67,8 +67,8 @@ services:
     ports:
       - "8083:8083"
     networks:
-      - data_automation-net
+      - data-automation-net
 
 networks:
-  data_automation-net:
+  data-automation-net:
     external: true
