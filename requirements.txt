@@ -5,5 +5,5 @@ python-dotenv
 apscheduler
 kafka-python==2.0.2
 psycopg2-binary
-git+ssh://git@github.com/Automated-Datavault-Schema-Evolution/MyLogger.git@v0.2.1#egg=mylogger
+git+https://github.com/Automated-Datavault-Schema-Evolution/MyLogger.git@v0.2.1#egg=mylogger
 docker
