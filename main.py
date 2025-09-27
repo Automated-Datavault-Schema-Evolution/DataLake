@@ -3,9 +3,8 @@ import signal
 import sys
 import time
 
-import pandas as pd
 from apscheduler.schedulers.background import BackgroundScheduler
-from logger import log
+from logger import log, log_step
 from pyspark.sql.types import StructType, StructField, StringType
 
 from config import (
@@ -23,7 +22,8 @@ from config import (
 from utils.kafka_utils import get_kafka_consumer, sanity_check_kafka, get_topic_backlog
 from utils.lake_utils import write_to_delta
 from utils.parse_utils import parse_message_to_row
-from utils.spark_utiils import get_spark_session
+from utils.spark_utiils import get_spark_session, normalize_ingestion_timestamp, normalize_date_columns_dynamic, \
+    build_typed_df_from_rows
 from utils.spark_work_autoscaler import check_and_scale_workers, cleanup_workers
 
 
@@ -41,209 +41,228 @@ def process_batch(batch_df, epoch_id):
                   ] + [col("row")[k].alias(k) for k in columns]
 
     exploded_flat = batch_df.select(*select_cols)
+    # Ensure proper TIMESTAMP (trimmed to seconds) before writing
+    exploded_flat = normalize_ingestion_timestamp(exploded_flat)
+    exploded_flat = normalize_date_columns_dynamic(exploded_flat)
     if exploded_flat.head(1):
         write_to_delta(exploded_flat, DELTA_PATH)
         log.info(f"Streaming batch written, epoch {epoch_id}")
 
 
 def bulk_ingest(spark, max_messages=None):
-    log.info("Bulk fallback: draining any buffered records from Kafka…")
-    try:
-        consumer = get_kafka_consumer()
-        log.info(f"Kafka consumer created with servers: {KAFKA_BOOTSTRAP_SERVERS}")
-    except Exception as e:
-        log.error(f"Failed to create Kafka consumer: {e}")
-        return
-
-    rows = []
-    count = 0
-    empty_polls = 0
-
-    while empty_polls < 3 and (max_messages is None or count < max_messages):
-        max_records = 1000
-        if max_messages is not None:
-            remaining = max_messages - count
-            max_records = min(max_records, remaining)
+    with log_step("Bulk fallback: draining any buffered records from Kafka"):
         try:
-            log.debug(f"Polling Kafka (max_records={max_records})...")
-            batch = consumer.poll(timeout_ms=1000, max_records=max_records)
+            consumer = get_kafka_consumer()
+            log.info(f"Kafka consumer created with servers: {KAFKA_BOOTSTRAP_SERVERS}")
         except Exception as e:
-            log.error(f"Error polling Kafka: {e}")
-            break
-        if not batch:
-            empty_polls += 1
-            log.debug(f"No messages polled. Empty polls so far: {empty_polls}")
-            continue
+            log.error(f"Failed to create Kafka consumer: {e}")
+            return
+
+        rows = []
+        count = 0
         empty_polls = 0
-        for tp, messages in batch.items():
-            log.debug(f"Polled {len(messages)} messages from partition {tp.partition}")
-            for msg in messages:
-                parsed_rows = parse_message_to_row(msg) or []
-                for row in parsed_rows:
-                    # keep filename and format only for routing, not for storage
-                    row['filename'] = msg.value.get('filename')
-                    row['data_format'] = msg.value.get('data_format')
-                rows.extend(parsed_rows)
-                count += len(parsed_rows)
 
-    if rows:
-        pdf = pd.DataFrame(rows)
-        pdf = pdf.where(pd.notnull(pdf), None)
-        pdf = pdf.astype(str)
-        schema = StructType([StructField(col, StringType(), True) for col in pdf.columns])
-        df = spark.createDataFrame(pdf, schema=schema)
-        write_to_delta(df, DELTA_PATH)
-        log.info(f"Bulk fallback wrote {count} rows to delta-lake")
-    else:
-        log.info("Bulk fallback: no new records to drain.")
+        while empty_polls < 3 and (max_messages is None or count < max_messages):
+            max_records = 1000
+            if max_messages is not None:
+                remaining = max_messages - count
+                max_records = min(max_records, remaining)
+            try:
+                log.debug(f"Polling Kafka (max_records={max_records})...")
+                batch = consumer.poll(timeout_ms=1000, max_records=max_records)
+            except Exception as e:
+                log.error(f"Error polling Kafka: {e}")
+                break
+            if not batch:
+                empty_polls += 1
+                log.debug(f"No messages polled. Empty polls so far: {empty_polls}")
+                continue
+            empty_polls = 0
+            for tp, messages in batch.items():
+                log.debug(f"Polled {len(messages)} messages from partition {tp.partition}")
+                for msg in messages:
+                    parsed_rows = parse_message_to_row(msg) or []
+                    for row in parsed_rows:
+                        # keep filename and format only for routing, not for storage
+                        row['filename'] = msg.value.get('filename')
+                        row['data_format'] = msg.value.get('data_format')
+                    rows.extend(parsed_rows)
+                    count += len(parsed_rows)
 
-    # commit offsets so backlog calculation reflects drained records
-    try:
-        consumer.commit()
-        log.debug("Bulk fallback committed offsets")
-    except Exception as e:
-        log.error(f"Failed to commit offsets after bulk ingestion: {e}")
-    try:
-        backlog = get_topic_backlog()
-        log.info(f"Backlog after bulk ingestion: {backlog} messages")
-    except Exception as e:
-        log.error(f"Failed to get topic backlog: {e}")
+        if rows:
+            # pdf = pd.DataFrame(rows)
+            # pdf = pdf.where(pd.notnull(pdf), None)
+            # pdf = pdf.astype(str)
+            # schema = StructType([StructField(col, StringType(), True) for col in pdf.columns])
+            # df = spark.createDataFrame(pdf, schema=schema)
+            # # Ensure proper TIMESTAMP (trimmed to seconds) before writing
+            # df = normalize_ingestion_timestamp(df)
+            # write_to_delta(df, DELTA_PATH)
+            # union of all keys -> schema columns (all strings at rest)
+            from pyspark.sql import functions as F
+            all_cols = sorted({k for r in rows for k in r.keys()})
+            rows_norm = [{**{c: None for c in all_cols}, **r} for r in rows]
+            # schema = StructType([StructField(c, StringType(), True) for c in all_cols])
+            # df = spark.createDataFrame(rows_norm, schema=schema)
+            df = build_typed_df_from_rows(spark, rows_norm)
+            # Ensure proper TIMESTAMP (trimmed to seconds) before writing
+            df = normalize_ingestion_timestamp(df)
+            df = normalize_date_columns_dynamic(df)
+            select_exprs = [
+                F.col(c) if t in ("date", "timestamp") or c == "ingestion_timestamp" else F.col(c).cast("string").alias(
+                    c)
+                for c, t in df.dtypes]
+            df = df.select(*select_exprs)
+            write_to_delta(df, DELTA_PATH)
+            log.info(f"Bulk fallback wrote {count} rows to delta-lake")
+        else:
+            log.info("Bulk fallback: no new records to drain.")
 
-    consumer.close()
-    log.debug("Bulk fallback Kafka consumer closed")
+        # commit offsets so backlog calculation reflects drained records
+        try:
+            consumer.commit()
+            log.debug("Bulk fallback committed offsets")
+        except Exception as e:
+            log.error(f"Failed to commit offsets after bulk ingestion: {e}")
+        try:
+            backlog = get_topic_backlog()
+            log.info(f"Backlog after bulk ingestion: {backlog} messages")
+        except Exception as e:
+            log.error(f"Failed to get topic backlog: {e}")
+
+        consumer.close()
+        log.debug("Bulk fallback Kafka consumer closed")
 
 
 def streaming_ingest(spark):
-    log.info("Start streaming ingestion")
-    log.debug(f"Kafka topic={KAFKA_TOPIC}, bootstrap={KAFKA_BOOTSTRAP_SERVERS}, group-id={KAFKA_GROUP_ID}")
-    try:
-        from pyspark.sql.functions import from_json, col, udf, explode, expr
-        from pyspark.sql.types import ArrayType, MapType
+    with log_step("Start streaming ingestion"):
+        log.debug(f"Kafka topic={KAFKA_TOPIC}, bootstrap={KAFKA_BOOTSTRAP_SERVERS}, group-id={KAFKA_GROUP_ID}")
+        try:
+            from pyspark.sql.functions import from_json, col, udf, explode, expr
+            from pyspark.sql.types import ArrayType, MapType
 
-        schema = StructType([
-            StructField("filename", StringType()),
-            StructField("data_format", StringType()),
-            StructField("ingestion_timestamp", StringType()),
-            StructField("data", ArrayType(MapType(StringType(), StringType()))),
-        ])
-        log.debug(f"Streaming schema: {schema.simpleString()}")
+            schema = StructType([
+                StructField("filename", StringType()),
+                StructField("data_format", StringType()),
+                StructField("ingestion_timestamp", StringType()),
+                StructField("data", ArrayType(MapType(StringType(), StringType()))),
+            ])
+            log.debug(f"Streaming schema: {schema.simpleString()}")
 
-        df = (
-            spark.readStream.format("kafka")
-            .option("kafka.bootstrap.servers", KAFKA_BOOTSTRAP_SERVERS)
-            .option("subscribe", KAFKA_TOPIC)
-            .option("startingOffsets", KAFKA_STARTING_OFFSETS)
-            .option("kafka.group.id", KAFKA_GROUP_ID)
-            # .option("kafka.commit.groupOffsets", "true")
-            .load()
-        )
-        log.debug(f"Connected to kafka server {KAFKA_BOOTSTRAP_SERVERS} and topic {KAFKA_TOPIC}")
+            df = (
+                spark.readStream.format("kafka")
+                .option("kafka.bootstrap.servers", KAFKA_BOOTSTRAP_SERVERS)
+                .option("subscribe", KAFKA_TOPIC)
+                .option("startingOffsets", KAFKA_STARTING_OFFSETS)
+                .option("kafka.group.id", KAFKA_GROUP_ID)
+                # .option("kafka.commit.groupOffsets", "true")
+                .load()
+            )
+            log.debug(f"Connected to kafka server {KAFKA_BOOTSTRAP_SERVERS} and topic {KAFKA_TOPIC}")
 
-        parsed = (
-            df.selectExpr("partition", "offset", "CAST(value AS STRING) as json_value")
-            .select("partition", "offset", from_json(col("json_value"), schema).alias("data"))
-            .select("partition", "offset", "data.*")
-        )
+            parsed = (
+                df.selectExpr("partition", "offset", "CAST(value AS STRING) as json_value")
+                .select("partition", "offset", from_json(col("json_value"), schema).alias("data"))
+                .select("partition", "offset", "data.*")
+            )
 
-        parsed_with_ts = parsed.select(
-            "partition",
-            "offset",
-            "filename",
-            "data_format",
-            "ingestion_timestamp",
-            expr(
-                "transform(data, x -> map_concat(x, map('source_ingestion_timestamp', ingestion_timestamp)))"
-            ).alias("rows"),
-        )
+            parsed_with_ts = parsed.select(
+                "partition",
+                "offset",
+                "filename",
+                "data_format",
+                "ingestion_timestamp",
+                col("data").alias("rows"),
+            )
 
-        flattened = parsed_with_ts.select(
-            "partition",
-            "offset",
-            "filename",
-            "data_format",
-            "ingestion_timestamp",
-            explode(col("rows")).alias("row"),
-        )
+            flattened = parsed_with_ts.select(
+                "partition",
+                "offset",
+                "filename",
+                "data_format",
+                "ingestion_timestamp",
+                explode(col("rows")).alias("row"),
+            )
 
-        query = (
-            flattened.writeStream.trigger(processingTime="1 second")
-            .foreachBatch(process_batch)
-            .outputMode("append")
-            .option("checkpointLocation", CHECKPOINT_PATH)
-            .start()
-        )
-        return query
+            query = (
+                flattened.writeStream.trigger(processingTime="1 second")
+                .foreachBatch(process_batch)
+                .outputMode("append")
+                .option("checkpointLocation", CHECKPOINT_PATH)
+                .start()
+            )
+            return query
 
-    except Exception as e:
-        log.critical(f"STREAMING FAILURE: {e} — switching to bulk ingestion", exc_info=True)
-        bulk_ingest(spark)
-        raise
+        except Exception as e:
+            log.critical(f"STREAMING FAILURE: {e} — switching to bulk ingestion", exc_info=True)
+            bulk_ingest(spark)
+            raise
 
 
 def schedule_bulk(spark):
-    scheduler = BackgroundScheduler()
-    if SCHEDULE_TYPE == "cron":
-        from apscheduler.triggers.cron import CronTrigger
+    with log_step("Scheduling bulk ingestion"):
+        scheduler = BackgroundScheduler()
+        if SCHEDULE_TYPE == "cron":
+            from apscheduler.triggers.cron import CronTrigger
 
-        scheduler.add_job(
-            lambda: bulk_ingest(spark), CronTrigger.from_crontab(SCHEDULE_CRON)
-        )
-        log.info(f"Scheduled bulk ingestion with CRON: {SCHEDULE_CRON}")
-    else:
-        scheduler.add_job(
-            lambda: bulk_ingest(spark), 'interval', hours=SCHEDULE_INTERVAL_HOURS
-        )
-        log.info(f"Scheduled bulk ingestion every {SCHEDULE_INTERVAL_HOURS} hours")
-    scheduler.start()
+            scheduler.add_job(
+                lambda: bulk_ingest(spark), CronTrigger.from_crontab(SCHEDULE_CRON)
+            )
+            log.info(f"Scheduled bulk ingestion with CRON: {SCHEDULE_CRON}")
+        else:
+            scheduler.add_job(
+                lambda: bulk_ingest(spark), 'interval', hours=SCHEDULE_INTERVAL_HOURS
+            )
+            log.info(f"Scheduled bulk ingestion every {SCHEDULE_INTERVAL_HOURS} hours")
+        scheduler.start()
 
 
 def main():
-    log.info("Starting Delta Lake Handler.")
+    with log_step("Starting Delta Lake Handler"):
+        spark = get_spark_session()
+        sanity_check_kafka()
 
-    spark = get_spark_session()
-    sanity_check_kafka()
-
-    if PROCESSING_MODE == 'streaming':
-        while True:
-            backlog = get_topic_backlog()
-            check_and_scale_workers()
-            if backlog > 0:
-                log.info(
-                    f"Auto consuming backlog of {backlog} messages"
-                )
-                while backlog > 0:
-                    to_drain = min(backlog, BACKLOG_BATCH_SIZE)
-                    log.info(f"Draining {to_drain} messages from backlog (auto mode)")
-                    bulk_ingest(spark, max_messages=to_drain)
-                    backlog = get_topic_backlog()
-                    if backlog > 0:
-                        log.info(f"{backlog} messages remain in backlog")
-                log.info("Re-checking backlog in 5s…")
-                time.sleep(5)
-                continue
-            else:
-                break
-        while True:
-            try:
-                query = streaming_ingest(spark)  # Should return the query object
-                log.info("Streaming ingestion started. Awaiting termination...")
-                query.awaitTermination()
-            except Exception:
-                log.error(
-                    "STREAMING FAILED – falling back to bulk drain", exc_info=True
-                )
-                bulk_ingest(spark)
-                log.info("Re-starting streaming ingestion in 30s…")
-                time.sleep(30)
-    elif PROCESSING_MODE == 'bulk':
-        schedule_bulk(spark)
-        # keep process alive for scheduled jobs
-        while True:
-            time.sleep(60)
-    else:
-        log.critical(
-            f"Invalid MODE '{PROCESSING_MODE}' in .env. Use 'streaming' or 'bulk'."
-        )
+        if PROCESSING_MODE == 'streaming':
+            while True:
+                backlog = get_topic_backlog()
+                check_and_scale_workers()
+                if backlog > 0:
+                    log.info(
+                        f"Auto consuming backlog of {backlog} messages"
+                    )
+                    while backlog > 0:
+                        to_drain = min(backlog, BACKLOG_BATCH_SIZE)
+                        log.info(f"Draining {to_drain} messages from backlog (auto mode)")
+                        bulk_ingest(spark, max_messages=to_drain)
+                        backlog = get_topic_backlog()
+                        if backlog > 0:
+                            log.info(f"{backlog} messages remain in backlog")
+                    log.info("Re-checking backlog in 5s…")
+                    time.sleep(5)
+                    continue
+                else:
+                    break
+            while True:
+                try:
+                    query = streaming_ingest(spark)  # Should return the query object
+                    log.info("Streaming ingestion started. Awaiting termination...")
+                    query.awaitTermination()
+                except Exception:
+                    log.error(
+                        "STREAMING FAILED – falling back to bulk drain", exc_info=True
+                    )
+                    bulk_ingest(spark)
+                    log.info("Re-starting streaming ingestion in 30s…")
+                    time.sleep(30)
+        elif PROCESSING_MODE == 'bulk':
+            schedule_bulk(spark)
+            # keep process alive for scheduled jobs
+            while True:
+                time.sleep(60)
+        else:
+            log.critical(
+                f"Invalid MODE '{PROCESSING_MODE}' in .env. Use 'streaming' or 'bulk'."
+            )
 
 
 if __name__ == "__main__":

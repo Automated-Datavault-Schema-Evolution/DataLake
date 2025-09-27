@@ -56,10 +56,14 @@ SPARK_WORKER_IMAGE = os.getenv("SPARK_WORKER_IMAGE", "bitnami/spark:latest")
 SPARK_WORKER_CONTAINER_PREFIX = os.getenv("SPARK_WORKER_CONTAINER_PREFIX", "spark-worker-")
 SPARK_WORKER_CPU_THRESHOLD = float(os.getenv("SPARK_WORKER_CPU_THRESHOLD", "80"))
 DOCKER_NETWORK = os.getenv("DOCKER_NETWORK", "data_automation-net")
+SPARK_SQL_ADAPTIVE_COALESCE_PARTITIONS = os.getenv("SPARK_SQL_ADAPTIVE_COALESCE_PARTITIONS", "true").lower() == "true"
+SPARK_SQL_ADAPTIVE_ADVISORY_PARTITION_SIZE = os.getenv("SPARK_SQL_ADAPTIVE_ADVISORY_PARTITION_SIZE", "64m")
 
 DELTA_PATH = os.getenv("DELTA_PATH", "delta_files")
 CHECKPOINT_PATH = os.getenv("CHECKPOINT_PATH", "./tmp/delta/checkpoints")
 STREAMING_CHECKPOINT_PATH = os.path.join(CHECKPOINT_PATH, "streaming")
 
-# For dbt
-DBT_PROFILES_DIR = os.path.join(os.path.dirname(__file__), "profiles")
+# Python executor paths
+DRIVER_PY = os.getenv("DRIVER_PY", "/usr/local/bin/python")
+EXEC_PY = os.getenv("EXEC_PY", "/opt/bitnami/python/bin/python")
+SPARK_IVY_PATH = os.getenv("SPARK_IVY_PATH", "/tmp/.ivy2")

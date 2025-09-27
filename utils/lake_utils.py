@@ -1,10 +1,11 @@
 import os
 from datetime import datetime
 
-from logger import log
+from logger import log, log_step
 from psycopg2.extras import execute_values
 from psycopg2.pool import SimpleConnectionPool
 from pyspark.errors import AnalysisException
+from pyspark.sql import functions
 
 from config import (
     POSTGRES_HOST,
@@ -14,17 +15,14 @@ from config import (
     POSTGRES_PASSWORD,
     LAKE_TYPE, POSTGRES_POOL_MAX, POSTGRES_POOL_MIN,
 )
+from utils.spark_utiils import build_typed_df_from_rows
 
 # Global connection pool for PostgreSQL
 PG_POOL = None
 
-
+""""
 def write_to_delta(df, delta_path, partition_by=None):
-    """
-     Data is written to Delta unless ``LAKE_TYPE`` is ``"rdbms"``.  When running
-    in RDBMS mode, the batch is only stored in PostgreSQL using a table name
-    derived from the ``filename`` column if present.
-    """
+
     # Get the filename/table from the data if present
     if 'filename' in df.columns:
         # Single filename for this batch
@@ -71,62 +69,64 @@ def write_to_delta(df, delta_path, partition_by=None):
     efficiency.
     """
 
-    spark = df.sparkSession
+    with log_step(f"Write batch to Delta path {delta_path}"):
+        spark = df.sparkSession
 
-    def _write_single(sub_df, filename):
-        table_name = None
-        target_path = delta_path
-        if filename is not None:
-            table_name = os.path.splitext(os.path.basename(filename))[0].replace(".", "_").replace("-", "_")
-            target_path = os.path.join(delta_path, table_name)
+        def _write_single(sub_df, filename):
+            table_name = None
+            target_path = delta_path
+            if filename is not None:
+                table_name = os.path.splitext(os.path.basename(filename))[0].replace(".", "_").replace("-", "_")
+                target_path = os.path.join(delta_path, table_name)
 
-        if "data_format" in sub_df.columns:
-            sub_df = sub_df.drop("data_format")
-        drop_cols = [c for c in ["source_filename", "source_data_format"] if c in sub_df.columns]
-        if drop_cols:
-            sub_df = sub_df.drop(*drop_cols)
+            if "data_format" in sub_df.columns:
+                sub_df = sub_df.drop("data_format")
+            drop_cols = [c for c in ["source_filename", "source_data_format"] if c in sub_df.columns]
+            if drop_cols:
+                sub_df = sub_df.drop(*drop_cols)
 
-        if LAKE_TYPE != "rdbms":
-            try:
-                if partition_by and partition_by in sub_df.columns:
-                    sub_df.write.format("delta").mode("append").partitionBy(partition_by).save(target_path)
-                else:
-                    sub_df.write.format("delta").mode("append").save(target_path)
-                log.info(f"Written batch to Delta Lake at {target_path}")
-            except AnalysisException as e:
-                log.error(f"Delta Lake AnalysisException: {e}")
-            except Exception as e:
-                log.error(f"Error saving Delta file {target_path}: {e}")
+            if LAKE_TYPE != "rdbms":
+                try:
+                    if partition_by and partition_by in sub_df.columns:
+                        sub_df.write.format("delta").mode("append").partitionBy(partition_by).save(target_path)
+                    else:
+                        sub_df.write.format("delta").mode("append").save(target_path)
+                    log.info(f"Written batch to Delta Lake at {target_path}")
+                except AnalysisException as e:
+                    log.error(f"Delta Lake AnalysisException: {e}")
+                except Exception as e:
+                    log.error(f"Error saving Delta file {target_path}: {e}")
 
-        if LAKE_TYPE == "rdbms" and table_name is not None:
-            store_to_rdbms(table_name, sub_df)
+            if LAKE_TYPE == "rdbms" and table_name is not None:
+                store_to_rdbms(table_name, sub_df)
 
-    if "filename" in df.columns:
-        filenames = df.select("filename").distinct()
-        if filenames.count() == 1:
-            fname = filenames.first()["filename"]
-            _write_single(df.drop("filename"), fname)
+        if "filename" in df.columns:
+            filenames = df.select("filename").distinct()
+            if filenames.count() == 1:
+                fname = filenames.first()["filename"]
+                _write_single(df.drop("filename"), fname)
+            else:
+                aggregated = df.groupBy("filename").agg(
+                    functions.collect_list(functions.struct(*[c for c in df.columns if c != "filename"])).alias("rows")
+                )
+                for row in aggregated.collect():
+                    subset = build_typed_df_from_rows(spark, row.get("rows") or [])
+                    _write_single(subset, row["filename"])
         else:
-            aggregated = df.groupBy("filename").agg(
-                functions.collect_list(functions.struct(*[c for c in df.columns if c != "filename"])).alias("rows")
-            )
-            for row in aggregated.collect():
-                subset = spark.createDataFrame(row["rows"])
-                _write_single(subset, row["filename"])
-    else:
-        _write_single(df, None)
+            _write_single(df, None)
 
 
 def write_to_parquet(spark_df, output_path, mode='append', partition_by=None):
-    try:
-        writer = spark_df.write.format("delta").mode(mode)
-        if partition_by:
-            writer = writer.partitionBy(partition_by)
+    with log_step(f"Write DataFrame to Parquet {output_path}"):
+        try:
+            writer = spark_df.write.format("delta").mode(mode)
+            if partition_by:
+                writer = writer.partitionBy(partition_by)
 
-        writer.parquet(output_path)
-        log.info(f"Data written to Parquet file {output_path} with mode={mode}")
-    except Exception as e:
-        log.error(f"Failed to write to Parquet file: {e}", exc_info=True)
+            writer.parquet(output_path)
+            log.info(f"Data written to Parquet file {output_path} with mode={mode}")
+        except Exception as e:
+            log.error(f"Failed to write to Parquet file: {e}", exc_info=True)
 
 
 def init_postgres_pool(minconn=None, maxconn=None):
@@ -134,29 +134,30 @@ def init_postgres_pool(minconn=None, maxconn=None):
         Initialize and return a global psycopg2 connection pool.
         This pool will be used by all threads.
         """
-    global PG_POOL
-    if minconn is None:
-        minconn = POSTGRES_POOL_MIN
-    if maxconn is None:
-        maxconn = POSTGRES_POOL_MAX
-    if PG_POOL is None:
-        try:
-            PG_POOL = SimpleConnectionPool(
-                minconn,
-                maxconn,
-                host=POSTGRES_HOST,
-                port=POSTGRES_PORT,
-                dbname=POSTGRES_DB,
-                user=POSTGRES_USER,
-                password=POSTGRES_PASSWORD
-            )
-            log.info(f"PostgreSQL connection pool created (min={minconn}, max={maxconn}).")
-        except Exception as e:
-            log.error(f"Error establishing PostgreSQL connection pool: {e}")
-            raise
-    else:
-        log.debug("Reusing existing PostgreSQL connection pool.")
-    return PG_POOL
+    with log_step("Initialize PostgreSQL connection pool"):
+        global PG_POOL
+        if minconn is None:
+            minconn = POSTGRES_POOL_MIN
+        if maxconn is None:
+            maxconn = POSTGRES_POOL_MAX
+        if PG_POOL is None:
+            try:
+                PG_POOL = SimpleConnectionPool(
+                    minconn,
+                    maxconn,
+                    host=POSTGRES_HOST,
+                    port=POSTGRES_PORT,
+                    dbname=POSTGRES_DB,
+                    user=POSTGRES_USER,
+                    password=POSTGRES_PASSWORD
+                )
+                log.info(f"PostgreSQL connection pool created (min={minconn}, max={maxconn}).")
+            except Exception as e:
+                log.error(f"Error establishing PostgreSQL connection pool: {e}")
+                raise
+        else:
+            log.debug("Reusing existing PostgreSQL connection pool.")
+        return PG_POOL
 
 
 def get_postgres_connection():
@@ -283,76 +284,79 @@ def bulk_insert_dataframe(pdf, table_name, drop_columns=None, context=""):
       drop_columns: Optional list of columns to drop before insertion.
       context     : String prefix for log messages (e.g., batch id or function name).
     """
-    if drop_columns:
-        pdf = pdf.drop(columns=drop_columns)
-        log.debug(f"{context}Dropped columns {drop_columns}. New shape: {pdf.shape}")
+    with log_step(f"{context}Bulk insert into '{table_name}'"):
+        if drop_columns:
+            pdf = pdf.drop(columns=drop_columns)
+            log.debug(f"{context}Dropped columns {drop_columns}. New shape: {pdf.shape}")
 
-    if pdf.empty:
-        log.info(f"{context}DataFrame is empty; nothing to insert into '{table_name}'.")
-        return
+        if pdf.empty:
+            log.info(f"{context}DataFrame is empty; nothing to insert into '{table_name}'.")
+            return
 
-    if "insertion_timestamp" not in pdf.columns:
-        pdf["insertion_timestamp"] = datetime.now()
-        log.debug(f"{context}Added 'insertion_timestamp' column to DataFrame for table '{table_name}'.")
+        if "insertion_timestamp" not in pdf.columns:
+            pdf["insertion_timestamp"] = datetime.now()
+            log.debug(f"{context}Added 'insertion_timestamp' column to DataFrame for table '{table_name}'.")
 
-    if not table_exists(table_name):
-        log.info(f"{context}Table '{table_name}' does not exist. Creating table.")
-        create_table_if_not_exists(table_name, pdf)
-    else:
-        log.info(f"{context}Table '{table_name}' exists. Appending data.")
+        if not table_exists(table_name):
+            log.info(f"{context}Table '{table_name}' does not exist. Creating table.")
+            create_table_if_not_exists(table_name, pdf)
+        else:
+            log.info(f"{context}Table '{table_name}' exists. Appending data.")
 
-    columns = list(pdf.columns)
-    col_names = ", ".join([f'"{col}"' for col in columns])
-    insert_sql = f"INSERT INTO {table_name} ({col_names}) VALUES %s"
-    log.debug(f"{context}INSERT SQL for '{table_name}': {insert_sql}")
+        columns = list(pdf.columns)
+        col_names = ", ".join([f'"{col}"' for col in columns])
+        insert_sql = f"INSERT INTO {table_name} ({col_names}) VALUES %s"
+        log.debug(f"{context}INSERT SQL for '{table_name}': {insert_sql}")
 
-    data = [tuple(row) for row in pdf.values]
-    log.debug(f"{context}Prepared {len(data)} rows for insertion into '{table_name}'.")
+        data = [tuple(row) for row in pdf.values]
+        log.debug(f"{context}Prepared {len(data)} rows for insertion into '{table_name}'.")
 
-    conn = None
-    try:
-        conn = get_postgres_connection()
-        cur = conn.cursor()
+        conn = None
+        try:
+            conn = get_postgres_connection()
+            cur = conn.cursor()
 
-        execute_values(cur, insert_sql, data, page_size=1000)
-        conn.commit()
-        cur.close()
+            execute_values(cur, insert_sql, data, page_size=1000)
+            conn.commit()
+            cur.close()
 
-        log.info(f"{context}Bulk insert successful: Data saved to table '{table_name}'.")
-    except Exception as e:
-        log.error(f"{context}Error during bulk insert to table '{table_name}': {e}")
-    finally:
-        if conn:
-            release_postgres_connection(conn)
+            log.info(f"{context}Bulk insert successful: Data saved to table '{table_name}'.")
+        except Exception as e:
+            log.error(f"{context}Error during bulk insert to table '{table_name}': {e}")
+        finally:
+            if conn:
+                release_postgres_connection(conn)
 
 
 def store_to_rdbms(table_name, df):
     """
     Convert a Spark DataFrame to Pandas and insert into the RDBMS.
     """
-    try:
-        pdf = df.toPandas()
-        """
-        Pandas may create a fragmented DataFrame when columns are added
-        incrementally. Copying the DataFrame ensures it is contiguous and
-        avoids "DataFrame is highly fragmented" performance warnings during
-        insert operations.
-        """
-        pdf = pdf.copy()
-        log.debug(
-            f"Converted Spark DataFrame to Pandas for table '{table_name}', shape: {pdf.shape}"
-        )
-        bulk_insert_dataframe(pdf, table_name, context=f"store_to_rdbms for '{table_name}': ")
-    except Exception as e:
-        log.error(f"Error in store_to_rdbms for table '{table_name}': {e}")
+    with log_step(f"store_to_rdbms for '{table_name}'"):
+        try:
+            pdf = df.toPandas()
+            """
+            Pandas may create a fragmented DataFrame when columns are added
+            incrementally. Copying the DataFrame ensures it is contiguous and
+            avoids "DataFrame is highly fragmented" performance warnings during
+            insert operations.
+            """
+            pdf = pdf.copy()
+            log.debug(
+                f"Converted Spark DataFrame to Pandas for table '{table_name}', shape: {pdf.shape}"
+            )
+            bulk_insert_dataframe(pdf, table_name, context=f"store_to_rdbms for '{table_name}': ")
+        except Exception as e:
+            log.error(f"Error in store_to_rdbms for table '{table_name}': {e}")
 
 
 def store_to_parquet(dest_path, df):
     """
     Save a Spark DataFrame to a Parquet file.
     """
-    try:
-        df.write.mode("overwrite").parquet(dest_path)
-        log.info(f"Saved data to Parquet: {dest_path}")
-    except Exception as e:
-        log.error(f"Error saving Parquet file {dest_path}: {e}")
+    with log_step(f"Save DataFrame to Parquet {dest_path}"):
+        try:
+            df.write.mode("overwrite").parquet(dest_path)
+            log.info(f"Saved data to Parquet: {dest_path}")
+        except Exception as e:
+            log.error(f"Error saving Parquet file {dest_path}: {e}")
