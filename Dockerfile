@@ -1,38 +1,43 @@
-FROM python:3.10-slim-bullseye
+# ============================
+# Base image
+# ============================
+FROM python:3.12-slim-bullseye
 
-# Java 11 is officially supported by Spark 3.x and Delta Lake
-RUN apt-get update && apt-get install -y \
-    gcc \
-    libglib2.0-0 \
-    git \
-    openssh-client \
-    wget \
-    openjdk-11-jre-headless \
- && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      gcc \
+      libglib2.0-0 \
+      git \
+      openssh-client \
+      wget \
+      procps \
+      openjdk-17-jre-headless \
+  && rm -rf /var/lib/apt/lists/*
 
-ENV JAVA_HOME=/usr/lib/jvm/java-11-openjdk-amd64
+ENV JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64
 ENV PATH="${JAVA_HOME}/bin:${PATH}"
+
+# Silence root warning from pip
+ENV PIP_ROOT_USER_ACTION=ignore PIP_DISABLE_PIP_VERSION_CHECK=1
 
 WORKDIR /app
 
-# Add GitHub to known_hosts for SSH cloning
-RUN mkdir -p ~/.ssh && ssh-keyscan github.com >> ~/.ssh/known_hosts
 
-# Install Python dependencies
-COPY requirements.txt ./
-RUN --mount=type=ssh pip install --upgrade pip
-RUN --mount=type=ssh pip install -r requirements.txt
+# ============================
+# App setup
+# ============================
+WORKDIR /app
 
-# (OPTIONAL) If you use 'spark-submit' or Spark master/worker:
-# RUN wget https://dlcdn.apache.org/spark/spark-3.4.1/spark-3.4.1-bin-hadoop3.tgz \
-#     && tar -xzf spark-3.4.1-bin-hadoop3.tgz -C /opt \
-#     && ln -s /opt/spark-3.4.1-bin-hadoop3 /opt/spark
-# ENV SPARK_HOME=/opt/spark
-# ENV PATH=$SPARK_HOME/bin:$PATH
+# Python deps
+COPY requirements.txt ./requirements.txt
+RUN python -m pip install --upgrade pip && \
+    pip install --no-cache-dir -r requirements.txt
 
+# App code + env
 COPY . /app
 COPY .env.docker /app/.env.docker
 
-ENV ENV_TYPE=docker
+# Keep Ivy happy and mirror env knobs
+ENV ENV_TYPE=docker \
+    SPARK_IVY_PATH=/tmp/.ivy2
 
 CMD ["python", "main.py"]
