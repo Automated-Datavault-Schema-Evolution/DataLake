@@ -13,6 +13,9 @@ services:
       - ${CHECKPOINT_PATH}:/tmp/delta/checkpoints
       - ${HOST_DATA_DIRECTORY}:/app/data
       - /var/run/docker.sock:/var/run/docker.sock
+      - delta-jars:/opt/delta-jars:ro
+      - ext-jars:/opt/ext-jars:ro
+      - jdbc-driver:/opt/jdbc-jars:ro
     networks:
       - data-automation-net
     environment:
@@ -20,6 +23,21 @@ services:
       - KAFKA_BOOTSTRAP_SERVERS=kafka:9092 #change hardcoded variable, to dynamic from env-file (currently hardcoded, as it would use localhost:9092 in docker)
       - ENV_TYPE=docker
     restart: unless-stopped
+    ports:
+      - "4041:4041"
+    depends_on:
+      jdbc-driver-init:
+        condition: service_completed_successfully
+      delta-jars-init:
+        condition: service_completed_successfully
+      kafka-jars-init:
+        condition: service_completed_successfully
+      datalake-ingestion-spark-master:
+        condition: service_healthy
+      datalake-ingestion-spark-worker-1:
+        condition: service_healthy
+      datalake-ingestion-spark-worker-2:
+        condition: service_healthy
 
   datalake-ingestion-spark-master:
     image: ${SPARK_WORKER_IMAGE}
@@ -29,13 +47,26 @@ services:
       - SPARK_MASTER_PORT=7077
       - SPARK_MASTER_WEBUI_PORT=8080
       - KAFKA_BOOTSTRAP_SERVER=kafka:9092
+      - SPARK_LOCAL_DIRS=${CONTAINER_SCRATCH_DIR}
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "3"
+    volumes:
+      - ${HOST_SPARK_SCRATCH}:${CONTAINER_SCRATCH_DIR}   # shuffle/tmp
     ports:
       - "7077:7077"
       - "8080:8080"
-      - "4040:4040"
     networks:
       - data-automation-net
     restart: unless-stopped
+    healthcheck:
+      test: [ "CMD-SHELL", "curl -fsS http://localhost:8080/ > /dev/null || exit 1" ]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 5s
 
   datalake-ingestion-spark-worker-1:
     image: ${SPARK_WORKER_IMAGE}
@@ -44,14 +75,30 @@ services:
       - SPARK_MASTER_URL=spark://datalake-ingestion-spark-master:7077
       - SPARK_WORKER_MEMORY=${SPARK_EXECUTOR_MEMORY}
       - SPARK_WORKER_CORES=${SPARK_EXECUTOR_CORES}
-      - SPARK_WORKER_WEBUI_PORT=8082
+      - SPARK_WORKER_WEBUI_PORT=8081
       - KAFKA_BOOTSTRAP_SERVER=kafka:9092
+      - SPARK_LOCAL_DIRS=${CONTAINER_SCRATCH_DIR}
+    volumes:
+      - ${HOST_SPARK_SCRATCH}:${CONTAINER_SCRATCH_DIR}
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "3"
     depends_on:
-      - datalake-ingestion-spark-master
+      datalake-ingestion-spark-master:
+        condition: service_healthy
     ports:
-      - "8082:8082"
+      - "8081:8081"
     networks:
       - data-automation-net
+    restart: unless-stopped
+    healthcheck:
+      test: [ "CMD-SHELL", "curl -fsS http://localhost:8081/ > /dev/null || exit 1" ]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 5s
 
   datalake-ingestion-spark-worker-2:
     image: ${SPARK_WORKER_IMAGE}
@@ -60,14 +107,103 @@ services:
       - SPARK_MASTER_URL=spark://datalake-ingestion-spark-master:7077
       - SPARK_WORKER_MEMORY=${SPARK_EXECUTOR_MEMORY}
       - SPARK_WORKER_CORES=${SPARK_EXECUTOR_CORES}
-      - SPARK_WORKER_WEBUI_PORT=8083
+      - SPARK_WORKER_WEBUI_PORT=8082
       - KAFKA_BOOTSTRAP_SERVER=kafka:9092
+      - SPARK_LOCAL_DIRS=${CONTAINER_SCRATCH_DIR}
+    volumes:
+      - ${HOST_SPARK_SCRATCH}:${CONTAINER_SCRATCH_DIR}
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "3"
     depends_on:
-      - datalake-ingestion-spark-master
+      datalake-ingestion-spark-master:
+        condition: service_healthy
     ports:
-      - "8083:8083"
+      - "8082:8082"
     networks:
       - data-automation-net
+    restart: unless-stopped
+    healthcheck:
+      test: [ "CMD-SHELL", "curl -fsS http://localhost:8082/ > /dev/null || exit 1" ]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 5s
+
+  jdbc-driver-init:
+    image: curlimages/curl:8.10.1
+    user: "0:0"
+    entrypoint:
+      - sh
+      - -lc
+      - >
+        set -Eeuo pipefail; mkdir -p /out;
+        curl -fL --retry 5 --retry-all-errors
+        -o /out/postgresql-42.7.4.jar
+        https://repo1.maven.org/maven2/org/postgresql/postgresql/42.7.4/postgresql-42.7.4.jar;
+        ls -l /out
+    volumes:
+      - jdbc-driver:/out
+    networks:
+      - data-automation-net
+
+  delta-jars-init:
+    image: curlimages/curl:8.10.1
+    user: "0:0"
+    entrypoint:
+      - sh
+      - -lc
+      - |
+        set -Eeuo pipefail
+        mkdir -p /out
+        echo "Downloading Delta jars to /out ..."
+        curl -fL --retry 5 --retry-all-errors \
+          -o /out/delta-spark_2.12-3.3.0.jar \
+          https://repo1.maven.org/maven2/io/delta/delta-spark_2.12/3.3.0/delta-spark_2.12-3.3.0.jar
+        curl -fL --retry 5 --retry-all-errors \
+          -o /out/delta-storage-3.3.0.jar \
+          https://repo1.maven.org/maven2/io/delta/delta-storage/3.3.0/delta-storage-3.3.0.jar
+        ls -l /out
+    volumes:
+      - delta-jars:/out
+    networks: [ data-automation-net ]
+
+  kafka-jars-init:
+    image: curlimages/curl:8.10.1
+    user: "0:0"
+    entrypoint:
+      - sh
+      - -lc
+      - |
+        set -Eeuo pipefail
+        mkdir -p /out
+        echo "Downloading Kafka connector jars to /out ..."
+        curl -fL --retry 5 --retry-all-errors \
+          -o /out/spark-sql-kafka-0-10_2.12-3.5.6.jar \
+          https://repo1.maven.org/maven2/org/apache/spark/spark-sql-kafka-0-10_2.12/3.5.6/spark-sql-kafka-0-10_2.12-3.5.6.jar
+        curl -fL --retry 5 --retry-all-errors \
+          -o /out/spark-token-provider-kafka-0-10_2.12-3.5.6.jar \
+          https://repo1.maven.org/maven2/org/apache/spark/spark-token-provider-kafka-0-10_2.12/3.5.6/spark-token-provider-kafka-0-10_2.12-3.5.6.jar
+        curl -fL --retry 5 --retry-all-errors \
+          -o /out/kafka-clients-3.5.1.jar \
+          https://repo1.maven.org/maven2/org/apache/kafka/kafka-clients/3.5.1/kafka-clients-3.5.1.jar
+        curl -fL --retry 5 --retry-all-errors \
+          -o /out/commons-pool2-2.12.1.jar \
+          https://repo1.maven.org/maven2/org/apache/commons/commons-pool2/2.12.1/commons-pool2-2.12.1.jar
+        ls -l /out
+    volumes:
+      - ext-jars:/out
+    networks: [ data-automation-net ]
+
+volumes:
+  ext-jars:
+    external: true
+  jdbc-driver:
+    external: true
+  delta-jars:
+    external: true
 
 networks:
   data-automation-net:
