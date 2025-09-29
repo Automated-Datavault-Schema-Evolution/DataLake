@@ -61,6 +61,7 @@ SPARK_SQL_ADAPTIVE_ADVISORY_PARTITION_SIZE = os.getenv("SPARK_SQL_ADAPTIVE_ADVIS
 
 DELTA_PATH = os.getenv("DELTA_PATH", "delta_files")
 CHECKPOINT_PATH = os.getenv("CHECKPOINT_PATH", "./tmp/delta/checkpoints")
+CHECKPOINT_LOCATION = os.getenv("CHECKPOINT_LOCATION", "/tmp/delta/checkpoints")
 STREAMING_CHECKPOINT_PATH = os.path.join(CHECKPOINT_PATH, "streaming")
 
 # Python executor paths

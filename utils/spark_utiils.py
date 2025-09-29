@@ -151,23 +151,48 @@ def _infer_spark_type(py_val):
     return StringType()
 
 
-def build_typed_df_from_rows(spark: SparkSession, rows: list[dict]) -> "DataFrame":
+def build_typed_df_from_rows(spark, rows: list[dict]):
     """
-    Create a Spark DataFrame from a list of dicts with a *typed* schema:
-    - bool -> BooleanType
-    - int  -> LongType
-    - float-> DoubleType
-    - 'yyyy-MM-dd' -> DateType
-    - everything else -> StringType
+    Build a DataFrame from list[dict] with a safe two-phase typing:
+    1) Use Boolean/Long/Double where obvious; keep date-looking columns as STRING.
+    2) After createDataFrame, cast date-looking columns to DateType with to_date().
     """
     if not rows:
         return spark.createDataFrame([], StructType([]))
 
+    # union of keys (stable column order)
     all_cols = sorted({k for r in rows for k in r.keys()})
-    # first non-null sample per column
+    # first non-null value per column
     first_vals = {c: next((r.get(c) for r in rows if r.get(c) is not None), None) for c in all_cols}
-    schema = StructType([StructField(c, _infer_spark_type(first_vals[c]), True) for c in all_cols])
 
-    # ensure every row has every column
+    # Decide schema types (NO DateType here to avoid Python object requirement)
+    date_like_cols = set()
+    fields = []
+    for c in all_cols:
+        v = first_vals[c]
+        if isinstance(v, bool):
+            fields.append(StructField(c, BooleanType(), True))
+        elif isinstance(v, int):
+            fields.append(StructField(c, LongType(), True))
+        elif isinstance(v, float):
+            fields.append(StructField(c, DoubleType(), True))
+        elif isinstance(v, str) and _date_rx.match(v):
+            # remember to cast later
+            date_like_cols.add(c)
+            fields.append(StructField(c, StringType(), True))
+        else:
+            fields.append(StructField(c, StringType(), True))
+
+    schema = StructType(fields)
+
+    # Normalize rows so every column exists
     norm_rows = [{**{c: None for c in all_cols}, **r} for r in rows]
-    return spark.createDataFrame(norm_rows, schema=schema)
+
+    # Create DF with the safe schema
+    df = spark.createDataFrame(norm_rows, schema=schema)
+
+    # Now cast date-looking columns to DateType
+    for c in date_like_cols:
+        df = df.withColumn(c, F.to_date(F.col(c), "yyyy-MM-dd"))
+
+    return df

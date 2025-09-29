@@ -1,4 +1,4 @@
-from logger import log, log_step
+from logger import log
 
 
 def _log_message_overview(message):
@@ -15,16 +15,15 @@ def _log_message_overview(message):
 
 def parse_message_to_row(message):
     """Convert a Kafka message to a list of enriched row dictionaries."""
-    with log_step("Parse Kafka message"):
-        _log_message_overview(message)
-        msg = message.value
-        if 'data' not in msg or not isinstance(msg['data'], list):
-            log.warning('Message does not contain data')
-            return None
-
-        records = msg['data']
-        log.debug(f"Message contains {len(records)} records")
-        for row in records:
-            row['ingestion_timestamp'] = msg.get('ingestion_timestamp')
-        log.debug(f"Returning {len(records)} enriched records")
-        return records
+    # with log_step("Parse Kafka message"):
+    _log_message_overview(message)
+    msg = message.value
+    if 'data' not in msg or not isinstance(msg['data'], list):
+        log.warning('Message does not contain data')
+        return None
+    records = msg['data']
+    log.debug(f"Message contains {len(records)} records")
+    for row in records:
+        row['ingestion_timestamp'] = msg.get('ingestion_timestamp')
+    log.debug(f"Returning {len(records)} enriched records")
+    return records

@@ -22,6 +22,7 @@ services:
       - SSH_AUTH_SOCK=/ssh-agent
       - KAFKA_BOOTSTRAP_SERVERS=kafka:9092 #change hardcoded variable, to dynamic from env-file (currently hardcoded, as it would use localhost:9092 in docker)
       - ENV_TYPE=docker
+      - CHECKPOINT_LOCATION=/tmp/delta/checkpoints
     restart: unless-stopped
     ports:
       - "4041:4041"
