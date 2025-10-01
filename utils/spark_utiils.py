@@ -58,6 +58,8 @@ def get_spark_session(app_name="Kafka_Consumer_Lake_Handler"):
             # application ui
             .config("spark.ui.enabled", "true")
             .config("spark.ui.port", "4041")
+            .config("spark.ui.reverseProxy", "true")
+            .config("spark.ui.proxyBase", "/spark/dl/app")
             # timezone
             .config("spark.sql.session.timeZone", "Europe/Vienna")
         )
