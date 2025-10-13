@@ -61,32 +61,53 @@ may also be supplied in `postgres/db.env`, which is loaded automatically if pres
 ### Environment Variables
 
 ````yaml
-# Data lake type: "parquet" to store as Parquet files, or "rdbms" to write to a relational database
+HOST_DATA_ROOT=D:/automated_datavault_schema_evolution__stack/
+HOST_KAFKA_DATA=${HOST_DATA_ROOT}/kafka/data
+HOST_KAFKA_LOGS=${HOST_DATA_ROOT}/kafka/logs
+HOST_ZK_DATA=${HOST_DATA_ROOT}/zookeeper/data
+HOST_ZK_LOG=${HOST_DATA_ROOT}/zookeeper/log
+HOST_PG_DATA=${HOST_DATA_ROOT}/postgres/data
+HOST_HIVE_WAREHOUSE=${HOST_DATA_ROOT}/hive/warehouse
+HOST_SPARK_WAREHOUSE=${HOST_DATA_ROOT}/spark/warehouse
+HOST_SPARK_CHECKPOINTS=${HOST_DATA_ROOT}/spark/checkpoints
+HOST_SPARK_SCRATCH=${HOST_DATA_ROOT}/spark/scratch
+
+  # Python executor paths
+DRIVER_PY=/usr/local/bin/python
+EXEC_PY=/opt/bitnami/python/bin/python
+HOME=/tmp
+
+  # Maven Download of JARS or via docker packages
+ALLOW_MAVEN=0
+
+  # container paths
+CONTAINER_SPARK_WAREHOUSE_DIR=/data/spark/warehouse
+CONTAINER_SPARK_CHECKPOINTS_DIR=/data/spark/checkpoints
+CONTAINER_SCRATCH_DIR=/data/spark/scratch
+
+  # Data lake type: "parquet" to store as Parquet files, or "rdbms" to write to a relational database
 LAKE_TYPE=rdbms
 
-  # Kafka configuration
+  # Kafka configuration (these point to the externally managed Kafka)
 KAFKA_BOOTSTRAP_SERVERS=kafka:9092
 KAFKA_TOPIC=csv_deltas
-KAFKA_STARTING_OFFSETS=earliest   # 'earliest' to read all messages
-KAFKA_GROUP_ID=datalake-stream
-BACKLOG_BATCH_SIZE=500          # messages drained per backlog batch
+KAFKA_GROUP_ID=delta-streaming
+KAFKA_STARTING_OFFSETS=earliest     # 'earliest' to read all messages
+BACKLOG_BATCH_SIZE=500              # messages drained per backlog batch
 
-PROCESSING_MODE=streaming   # options: streaming or bulk
+PROCESSING_MODE=streaming           # options: streaming or bulk
 
 SCHEDULE_TYPE=interval      # options: "cron" or "interval"
-SCHEDULE_CRON=0 3 * * *     # Used if SCHEDULE_TYPE=cron
+SCHEDULE_CRON=0 3 * * *     # Used if SCHEDULE_TYPE=cron (at 03:00 daily, cron syntax)
 SCHEDULE_INTERVAL_HOURS=4   # Used if SCHEDULE_TYPE=interval
 
-DELTA_PATH=delta_files         # path where Delta tables are stored
-
-
 SPARK_MASTER=spark://datalake-ingestion-spark-master:7077
-SPARK_DRIVER_MEMORY=3g      # Spark driver JVM memory
-SPARK_EXECUTOR_MEMORY=3g    # Executor JVM memory per worker
-SPARK_DRIVER_CORES=2        # Cores for the driver
-SPARK_EXECUTOR_CORES=2      # Cores per executor
-SPARK_SQL_SHUFFLE_PARTITIONS=200
-SPARK_DYNAMIC_ALLOCATION=false
+SPARK_DRIVER_MEMORY=16g      # Spark driver JVM memory
+SPARK_EXECUTOR_MEMORY=16g    # Executor JVM memory per worker
+SPARK_DRIVER_CORES=8        # Cores for the driver
+SPARK_EXECUTOR_CORES=8      # Cores per executor
+SPARK_SQL_SHUFFLE_PARTITIONS=48
+SPARK_DYNAMIC_ALLOCATION=true
 SPARK_DYNAMIC_ALLOCATION_MIN_EXECUTORS=1
 SPARK_DYNAMIC_ALLOCATION_MAX_EXECUTORS=10
 SPARK_DYNAMIC_ALLOCATION_INITIAL_EXECUTORS=1
@@ -97,12 +118,27 @@ SPARK_DYNAMIC_SHUFFLE_TRACKING=true
 SPARK_AUTOSCALE=false           # enable Docker based scaling of workers
 SPARK_WORKER_MAX=5              # upper limit for auto-scaled workers
 SPARK_WORKER_MIN=1              # minimum number of workers to maintain
-SPARK_WORKER_IMAGE=bitnami/spark:3.5.6    # version matches used pyspark version
+SPARK_WORKER_IMAGE=bitnami/spark:3.5.6
 SPARK_WORKER_CONTAINER_PREFIX=spark-worker-
 SPARK_WORKER_CPU_THRESHOLD=60   # CPU percent usage triggering scale up
-DOCKER_NETWORK=data_automation-net
+DOCKER_NETWORK=data-automation-net
+SPARK_SQL_ADAPTIVE_COALESCE_PARTITIONS=true
+SPARK_SQL_ADAPTIVE_ADVISORY_PARTITION_SIZE=64m
 
-CHECKPOINT_PATH=/tmp/delta/checkpoints
+
+HOST_DATA_DIRECTORY=${HOST_DATA_ROOT}/data_lake
+CHECKPOINT_PATH=${HOST_DATA_DIRECTORY}/checkpoints
+DELTA_PATH=${HOST_DATA_DIRECTORY}/data
+
+  ## Postgres
+POSTGRES_HOST=host.docker.internal
+POSTGRES_PORT=5432
+POSTGRES_DB=datalake
+POSTGRES_USER=postgres
+POSTGRES_PASSWORD=postgres
+POSTGRES_POOL_MIN=1
+POSTGRES_POOL_MAX=5
+
 ````
 
 Enabling `SPARK_DYNAMIC_ALLOCATION` allows the Spark cluster to grow or shrink
