@@ -26,6 +26,7 @@ services:
     restart: unless-stopped
     ports:
       - "4041:4041"
+      - "50051:50051"
     depends_on:
       jdbc-driver-init:
         condition: service_completed_successfully
