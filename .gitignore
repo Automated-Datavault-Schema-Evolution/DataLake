@@ -2,7 +2,7 @@
 *.csv
 .venv
 *.env
-.env.docker
+.env
 delta_files/*
 
 

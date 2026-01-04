@@ -2,11 +2,11 @@ from __future__ import annotations
 
 import json
 import os
+import threading
+import time
 from concurrent import futures
 from typing import List, Dict, Any, Tuple
 
-import threading
-import time
 import grpc
 from delta.tables import DeltaTable
 from logger import log, log_step
@@ -333,6 +333,155 @@ def _handle_add_column(operation: pb.Operation) -> pb.OperationResult:
         return _handle_add_column_delta(operation)
 
 
+def _handle_change_type_rdbms(operation: pb.Operation) -> pb.OperationResult:
+    params = dict(operation.params)
+    column_name = params.get("column_name")
+    logical_type = params.get("to_logical_type") or params.get("logical_type")
+
+    if not column_name:
+        return pb.OperationResult(
+            correlation_id=operation.correlation_id,
+            plan_id=operation.plan_id,
+            idempotency_key=operation.idempotency_key,
+            status=pb.OPERATION_STATUS_PERMANENT_ERROR,
+            error_code="MISSING_PARAM",
+            error_message="column_name parameter is required for OPERATION_CHANGE_TYPE",
+        )
+
+    table_name = operation.target or params.get("table_name")
+    if not table_name:
+        return pb.OperationResult(
+            correlation_id=operation.correlation_id,
+            plan_id=operation.plan_id,
+            idempotency_key=operation.idempotency_key,
+            status=pb.OPERATION_STATUS_PERMANENT_ERROR,
+            error_code="MISSING_TARGET",
+            error_message="target (table_name) is required for OPERATION_CHANGE_TYPE",
+        )
+
+    if "." in table_name:
+        schema_name, tbl_name = table_name.split(".", 1)
+    else:
+        schema_name, tbl_name = "public", table_name
+
+    pg_type = _map_logical_to_pg_type(logical_type)
+    evidence_id = _make_evidence_id(operation)
+
+    with log_step(f"LakeHandler CHANGE_TYPE (RDBMS) for {schema_name}.{tbl_name}.{column_name}"):
+        conn = None
+        try:
+            conn = get_postgres_connection()
+            cur = conn.cursor()
+
+            cur.execute(
+                """
+                SELECT udt_name
+                FROM information_schema.columns
+                WHERE table_schema = %s
+                  AND table_name = %s
+                  AND column_name = %s
+                """,
+                (schema_name, tbl_name, column_name),
+            )
+            row = cur.fetchone()
+            if not row:
+                cur.close()
+                conn.commit()
+                return pb.OperationResult(
+                    correlation_id=operation.correlation_id,
+                    plan_id=operation.plan_id,
+                    idempotency_key=operation.idempotency_key,
+                    status=pb.OPERATION_STATUS_PERMANENT_ERROR,
+                    error_code="COLUMN_NOT_FOUND",
+                    error_message=f"Column {column_name} not found in {schema_name}.{tbl_name}",
+                    evidence_snapshot_id=evidence_id,
+                )
+
+            current_udt = (row[0] or "").lower()
+            comparable = current_udt
+            if comparable in {"varchar", "bpchar"}:
+                comparable = "text"
+            if comparable == "int4":
+                comparable = "integer"
+            if comparable == "int8":
+                comparable = "bigint"
+            if comparable == "float8":
+                comparable = "double precision"
+
+            if comparable == pg_type.lower():
+                cur.close()
+                conn.commit()
+                return pb.OperationResult(
+                    correlation_id=operation.correlation_id,
+                    plan_id=operation.plan_id,
+                    idempotency_key=operation.idempotency_key,
+                    status=pb.OPERATION_STATUS_ALREADY_APPLIED,
+                    error_code="",
+                    error_message="",
+                    evidence_snapshot_id=evidence_id,
+                )
+
+            ident_schema = '"' + schema_name.replace('"', '""') + '"'
+            ident_table = '"' + tbl_name.replace('"', '""') + '"'
+            ident_col = '"' + column_name.replace('"', '""') + '"'
+
+            alter_sql = (
+                f"ALTER TABLE {ident_schema}.{ident_table} "
+                f"ALTER COLUMN {ident_col} TYPE {pg_type} "
+                f"USING {ident_col}::{pg_type}"
+            )
+            cur.execute(alter_sql)
+            cur.close()
+            conn.commit()
+
+            status = pb.OPERATION_STATUS_OK
+            error_code = ""
+            error_message = ""
+
+        except Exception as exc:
+            if conn:
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
+            status = pb.OPERATION_STATUS_PERMANENT_ERROR
+            error_code = "RDBMS_ALTER_FAILED"
+            error_message = str(exc)
+        finally:
+            if conn:
+                release_postgres_connection(conn)
+
+    return pb.OperationResult(
+        correlation_id=operation.correlation_id,
+        plan_id=operation.plan_id,
+        idempotency_key=operation.idempotency_key,
+        status=status,
+        error_code=error_code,
+        error_message=error_message,
+        evidence_snapshot_id=evidence_id,
+    )
+
+
+def _handle_change_type_delta(operation: pb.Operation) -> pb.OperationResult:
+    kind_name = pb.OperationKind.Name(operation.kind)
+    return pb.OperationResult(
+        correlation_id=operation.correlation_id,
+        plan_id=operation.plan_id,
+        idempotency_key=operation.idempotency_key,
+        status=pb.OPERATION_STATUS_PERMANENT_ERROR,
+        error_code="UNSUPPORTED_BACKEND",
+        error_message=f"{kind_name} not implemented for Delta backend",
+        evidence_snapshot_id=_make_evidence_id(operation),
+    )
+
+
+def _handle_change_type(operation: pb.Operation) -> pb.OperationResult:
+    if LAKE_TYPE == "rdbms":
+        return _handle_change_type_rdbms(operation)
+    else:
+        return _handle_change_type_delta(operation)
+
+
 # ---------------------------------------------------------------------------
 # Evidence introspection
 # ---------------------------------------------------------------------------
@@ -493,6 +642,8 @@ class LakeHandlerService(pb_grpc.LakeHandlerServicer):
                 )
             elif op.kind == pb.OPERATION_ADD_COLUMN:
                 result = _handle_add_column(op)
+            elif op.kind == pb.OPERATION_CHANGE_TYPE:
+                result = _handle_change_type(op)
             else:
                 msg = f"Operation kind {kind_name} not supported by LakeHandler"
                 log.error(msg)

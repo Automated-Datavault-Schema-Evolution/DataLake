@@ -34,7 +34,7 @@ RUN python -m pip install --upgrade pip && \
 
 # App code + env
 COPY . /app
-COPY .env.docker /app/.env.docker
+COPY .env /app/.env.docker
 
 # Keep Ivy happy and mirror env knobs
 ENV ENV_TYPE=docker \

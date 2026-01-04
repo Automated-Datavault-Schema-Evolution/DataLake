@@ -7,7 +7,7 @@ services:
         - default
     container_name: DataLakeIngestionHandler
     env_file:
-      - .env.docker
+      - .env
     volumes:
       - ./:/app
       - ${CHECKPOINT_PATH}:/tmp/delta/checkpoints
@@ -48,14 +48,30 @@ services:
       - traefik.http.routers.dl-app.middlewares=dl-app-strip
 
   datalake-ingestion-spark-master:
-    image: ${SPARK_WORKER_IMAGE}
+    image: apache/spark:3.5.6
+    user: "0:0"
     container_name: datalake-ingestion-spark-master
     environment:
-      - SPARK_MODE=master
       - SPARK_MASTER_PORT=7077
       - SPARK_MASTER_WEBUI_PORT=8080
       - KAFKA_BOOTSTRAP_SERVER=kafka:9092
-      - SPARK_LOCAL_DIRS=${CONTAINER_SCRATCH_DIR}
+      - SPARK_CLASSPATH=/opt/delta-jars/*:/opt/ext-jars/*
+      - UMASK=0002
+      - SPARK_MASTER_OPTS=-Dspark.hadoop.fs.permissions.umask-mode=002
+      - SPARK_NO_DAEMONIZE=1
+      - SPARK_LOG_DIR=/tmp/spark/logs
+      - SPARK_PID_DIR=/tmp/spark/pids
+    command:
+      - /bin/bash
+      - -lc
+      - >
+        set -Eeuo pipefail;
+        /opt/spark/sbin/start-master.sh
+        -h datalake-ingestion-spark-master
+        -p "${SPARK_MASTER_PORT:-7077}"
+        --webui-port "${SPARK_MASTER_WEBUI_PORT:-8080}";
+        tail -F /opt/spark/logs/* &
+        wait -n
     logging:
       driver: "json-file"
       options:
@@ -63,6 +79,8 @@ services:
         max-file: "3"
     volumes:
       - ${HOST_SPARK_SCRATCH}:${CONTAINER_SCRATCH_DIR}   # shuffle/tmp
+      - delta-jars:/opt/delta-jars:ro
+      - ext-jars:/opt/ext-jars:ro
     ports:
       - "7077:7077"
       - "8080:8080"
@@ -70,31 +88,43 @@ services:
       - data-automation-net
     restart: unless-stopped
     healthcheck:
-      test: [ "CMD-SHELL", "curl -fsS http://localhost:8080/ > /dev/null || exit 1" ]
+      test: [ "CMD-SHELL", "bash -lc 'exec 3<>/dev/tcp/127.0.0.1/8080 && exec 3>&- 3<&- || exit 1'" ]
       interval: 5s
       timeout: 5s
       retries: 20
       start_period: 5s
-    labels:
-      - traefik.enable=true
-      - traefik.http.routers.spark-dl-master.rule=PathPrefix(`/spark/datalake/master`)
-      - traefik.http.services.spark-dl-master.loadbalancer.server.port=8080
-      - traefik.http.middlewares.spark-dl-master-strip.stripprefix.prefixes=/spark/datalake/master
-      - traefik.http.routers.spark-dl-master.middlewares=spark-dl-master-strip
 
 
   datalake-ingestion-spark-worker-1:
-    image: ${SPARK_WORKER_IMAGE}
+    image: apache/spark:3.5.6
+    user: "0:0"
     environment:
-      - SPARK_MODE=worker
-      - SPARK_MASTER_URL=spark://datalake-ingestion-spark-master:7077
       - SPARK_WORKER_MEMORY=${SPARK_EXECUTOR_MEMORY}
       - SPARK_WORKER_CORES=${SPARK_EXECUTOR_CORES}
       - SPARK_WORKER_WEBUI_PORT=8081
       - KAFKA_BOOTSTRAP_SERVER=kafka:9092
-      - SPARK_LOCAL_DIRS=${CONTAINER_SCRATCH_DIR}
+      - SPARK_CLASSPATH=/opt/delta-jars/*:/opt/ext-jars/*
+      - UMASK=0002
+      - SPARK_WORKER_OPTS=-Dspark.hadoop.fs.permissions.umask-mode=002
+      - SPARK_NO_DAEMONIZE=1
+      - SPARK_LOG_DIR=/tmp/spark/logs
+      - SPARK_PID_DIR=/tmp/spark/pids
+    command:
+      - /bin/bash
+      - -lc
+      - >
+        set -Eeuo pipefail;
+        /opt/spark/sbin/start-worker.sh
+        --webui-port "${SPARK_WORKER_WEBUI_PORT:-8081}"
+        -c "${SPARK_WORKER_CORES:-8}"
+        -m "${SPARK_WORKER_MEMORY:-4g}"
+        spark://datalake-ingestion-spark-master:7077;
+        tail -F /opt/spark/logs/* &
+        wait -n
     volumes:
-      - ${HOST_SPARK_SCRATCH}:${CONTAINER_SCRATCH_DIR}
+      - ${HOST_SPARK_SCRATCH}:${CONTAINER_SCRATCH_DIR}   # shuffle/tmp
+      - delta-jars:/opt/delta-jars:ro
+      - ext-jars:/opt/ext-jars:ro
     logging:
       driver: "json-file"
       options:
@@ -109,24 +139,42 @@ services:
       - data-automation-net
     restart: unless-stopped
     healthcheck:
-      test: [ "CMD-SHELL", "curl -fsS http://localhost:8081/ > /dev/null || exit 1" ]
+      test: [ "CMD-SHELL", "bash -lc 'exec 3<>/dev/tcp/127.0.0.1/8081 && exec 3>&- 3<&- || exit 1'" ]
       interval: 5s
       timeout: 5s
       retries: 20
       start_period: 5s
 
   datalake-ingestion-spark-worker-2:
-    image: ${SPARK_WORKER_IMAGE}
+    image: apache/spark:3.5.6
+    user: "0:0"
     environment:
-      - SPARK_MODE=worker
-      - SPARK_MASTER_URL=spark://datalake-ingestion-spark-master:7077
       - SPARK_WORKER_MEMORY=${SPARK_EXECUTOR_MEMORY}
       - SPARK_WORKER_CORES=${SPARK_EXECUTOR_CORES}
       - SPARK_WORKER_WEBUI_PORT=8082
       - KAFKA_BOOTSTRAP_SERVER=kafka:9092
-      - SPARK_LOCAL_DIRS=${CONTAINER_SCRATCH_DIR}
+      - SPARK_CLASSPATH=/opt/delta-jars/*:/opt/ext-jars/*
+      - UMASK=0002
+      - SPARK_WORKER_OPTS=-Dspark.hadoop.fs.permissions.umask-mode=002
+      - SPARK_NO_DAEMONIZE=1
+      - SPARK_LOG_DIR=/tmp/spark/logs
+      - SPARK_PID_DIR=/tmp/spark/pids
+    command:
+      - /bin/bash
+      - -lc
+      - >
+        set -Eeuo pipefail;
+        /opt/spark/sbin/start-worker.sh
+        --webui-port "${SPARK_WORKER_WEBUI_PORT:-8082}"
+        -c "${SPARK_WORKER_CORES:-8}"
+        -m "${SPARK_WORKER_MEMORY:-4g}"
+        spark://datalake-ingestion-spark-master:7077;
+        tail -F /opt/spark/logs/* &
+        wait -n
     volumes:
-      - ${HOST_SPARK_SCRATCH}:${CONTAINER_SCRATCH_DIR}
+      - ${HOST_SPARK_SCRATCH}:${CONTAINER_SCRATCH_DIR}   # shuffle/tmp
+      - delta-jars:/opt/delta-jars:ro
+      - ext-jars:/opt/ext-jars:ro
     logging:
       driver: "json-file"
       options:
@@ -141,7 +189,7 @@ services:
       - data-automation-net
     restart: unless-stopped
     healthcheck:
-      test: [ "CMD-SHELL", "curl -fsS http://localhost:8082/ > /dev/null || exit 1" ]
+      test: [ "CMD-SHELL", "bash -lc 'exec 3<>/dev/tcp/127.0.0.1/8082 && exec 3>&- 3<&- || exit 1'" ]
       interval: 5s
       timeout: 5s
       retries: 20
