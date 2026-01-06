@@ -20,6 +20,272 @@ from utils.spark_utiils import get_spark_session
 _SPARK = None
 
 
+def _handle_drop_column_rdbms(operation: pb.Operation) -> pb.OperationResult:
+    params = dict(operation.params)
+    table_name = operation.target or params.get("table_name")
+    column_name = params.get("column_name") or params.get("attribute")
+
+    if not table_name:
+        return pb.OperationResult(
+            correlation_id=operation.correlation_id,
+            plan_id=operation.plan_id,
+            idempotency_key=operation.idempotency_key,
+            status=pb.OPERATION_STATUS_PERMANENT_ERROR,
+            error_code="MISSING_TARGET",
+            error_message="target (table_name) is required for OPERATION_DROP_COLUMN",
+        )
+    if not column_name:
+        return pb.OperationResult(
+            correlation_id=operation.correlation_id,
+            plan_id=operation.plan_id,
+            idempotency_key=operation.idempotency_key,
+            status=pb.OPERATION_STATUS_PERMANENT_ERROR,
+            error_code="MISSING_PARAM",
+            error_message="column_name parameter is required for OPERATION_DROP_COLUMN",
+        )
+
+    evidence_id = _make_evidence_id(operation)
+    conn = None
+    try:
+        conn = get_postgres_connection()
+        with conn.cursor() as cur:
+            # Idempotency: check exists
+            cur.execute(
+                """
+                SELECT 1
+                FROM information_schema.columns
+                WHERE table_schema = 'public'
+                  AND table_name = %s
+                  AND column_name = %s LIMIT 1
+                """,
+                (table_name, column_name),
+            )
+            exists = cur.fetchone() is not None
+            if not exists:
+                return pb.OperationResult(
+                    correlation_id=operation.correlation_id,
+                    plan_id=operation.plan_id,
+                    idempotency_key=operation.idempotency_key,
+                    status=pb.OPERATION_STATUS_ALREADY_APPLIED,
+                    error_code="",
+                    error_message="",
+                    evidence_snapshot_id=evidence_id,
+                )
+
+            cur.execute(f'ALTER TABLE "public"."{table_name}" DROP COLUMN "{column_name}"')
+        conn.commit()
+
+        return pb.OperationResult(
+            correlation_id=operation.correlation_id,
+            plan_id=operation.plan_id,
+            idempotency_key=operation.idempotency_key,
+            status=pb.OPERATION_STATUS_OK,
+            error_code="",
+            error_message="",
+            evidence_snapshot_id=evidence_id,
+        )
+    except Exception as exc:
+        if conn:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+        return pb.OperationResult(
+            correlation_id=operation.correlation_id,
+            plan_id=operation.plan_id,
+            idempotency_key=operation.idempotency_key,
+            status=pb.OPERATION_STATUS_PERMANENT_ERROR,
+            error_code="LAKE_DROP_COLUMN_FAILED",
+            error_message=str(exc),
+            evidence_snapshot_id=evidence_id,
+        )
+    finally:
+        if conn:
+            release_postgres_connection(conn)
+
+
+def _handle_drop_column_delta(operation: pb.Operation) -> pb.OperationResult:
+    params = dict(operation.params)
+    table_name = operation.target or params.get("table_name")
+    column_name = params.get("column_name") or params.get("attribute")
+
+    if not table_name:
+        return pb.OperationResult(
+            correlation_id=operation.correlation_id,
+            plan_id=operation.plan_id,
+            idempotency_key=operation.idempotency_key,
+            status=pb.OPERATION_STATUS_PERMANENT_ERROR,
+            error_code="MISSING_TARGET",
+            error_message="target (table_name) is required for OPERATION_DROP_COLUMN",
+        )
+    if not column_name:
+        return pb.OperationResult(
+            correlation_id=operation.correlation_id,
+            plan_id=operation.plan_id,
+            idempotency_key=operation.idempotency_key,
+            status=pb.OPERATION_STATUS_PERMANENT_ERROR,
+            error_code="MISSING_PARAM",
+            error_message="column_name parameter is required for OPERATION_DROP_COLUMN",
+        )
+
+    evidence_id = _make_evidence_id(operation)
+    spark = _get_spark()
+    path = _delta_table_path(table_name)
+
+    if not _delta_exists(spark, path):
+        # If table not yet present, treat as transient (SEF can retry)
+        return pb.OperationResult(
+            correlation_id=operation.correlation_id,
+            plan_id=operation.plan_id,
+            idempotency_key=operation.idempotency_key,
+            status=pb.OPERATION_STATUS_TRANSIENT_ERROR,
+            error_code="DELTA_NOT_FOUND",
+            error_message=f"Delta table not found at {path}",
+            evidence_snapshot_id=evidence_id,
+        )
+
+    try:
+        df = spark.read.format("delta").load(path)
+        cols = df.columns
+
+        if column_name not in cols:
+            return pb.OperationResult(
+                correlation_id=operation.correlation_id,
+                plan_id=operation.plan_id,
+                idempotency_key=operation.idempotency_key,
+                status=pb.OPERATION_STATUS_ALREADY_APPLIED,
+                error_code="",
+                error_message="",
+                evidence_snapshot_id=evidence_id,
+            )
+
+        kept = [c for c in cols if c != column_name]
+        out = df.select(*kept)
+
+        (out.write
+         .format("delta")
+         .mode("overwrite")
+         .option("overwriteSchema", "true")
+         .save(path))
+
+        return pb.OperationResult(
+            correlation_id=operation.correlation_id,
+            plan_id=operation.plan_id,
+            idempotency_key=operation.idempotency_key,
+            status=pb.OPERATION_STATUS_OK,
+            error_code="",
+            error_message="",
+            evidence_snapshot_id=evidence_id,
+        )
+    except Exception as exc:
+        return pb.OperationResult(
+            correlation_id=operation.correlation_id,
+            plan_id=operation.plan_id,
+            idempotency_key=operation.idempotency_key,
+            status=pb.OPERATION_STATUS_PERMANENT_ERROR,
+            error_code="DELTA_DROP_COLUMN_FAILED",
+            error_message=str(exc),
+            evidence_snapshot_id=evidence_id,
+        )
+
+
+def _handle_drop_column(operation: pb.Operation) -> pb.OperationResult:
+    if LAKE_TYPE == "rdbms":
+        return _handle_drop_column_rdbms(operation)
+    return _handle_drop_column_delta(operation)
+
+
+def _handle_change_type_delta(operation: pb.Operation) -> pb.OperationResult:
+    params = dict(operation.params)
+    table_name = operation.target or params.get("table_name")
+    column_name = params.get("column_name") or params.get("attribute")
+    to_logical_type = params.get("to_logical_type") or params.get("logical_type")
+
+    if not table_name:
+        return pb.OperationResult(
+            correlation_id=operation.correlation_id,
+            plan_id=operation.plan_id,
+            idempotency_key=operation.idempotency_key,
+            status=pb.OPERATION_STATUS_PERMANENT_ERROR,
+            error_code="MISSING_TARGET",
+            error_message="target (table_name) is required for OPERATION_CHANGE_TYPE",
+        )
+    if not column_name or not to_logical_type:
+        return pb.OperationResult(
+            correlation_id=operation.correlation_id,
+            plan_id=operation.plan_id,
+            idempotency_key=operation.idempotency_key,
+            status=pb.OPERATION_STATUS_PERMANENT_ERROR,
+            error_code="MISSING_PARAM",
+            error_message="column_name and to_logical_type are required for OPERATION_CHANGE_TYPE",
+        )
+
+    evidence_id = _make_evidence_id(operation)
+    spark = _get_spark()
+    path = _delta_table_path(table_name)
+
+    if not _delta_exists(spark, path):
+        return pb.OperationResult(
+            correlation_id=operation.correlation_id,
+            plan_id=operation.plan_id,
+            idempotency_key=operation.idempotency_key,
+            status=pb.OPERATION_STATUS_TRANSIENT_ERROR,
+            error_code="DELTA_NOT_FOUND",
+            error_message=f"Delta table not found at {path}",
+            evidence_snapshot_id=evidence_id,
+        )
+
+    target_spark_type = _map_logical_to_spark_type(to_logical_type)
+
+    try:
+        df = spark.read.format("delta").load(path)
+        if column_name not in df.columns:
+            return pb.OperationResult(
+                correlation_id=operation.correlation_id,
+                plan_id=operation.plan_id,
+                idempotency_key=operation.idempotency_key,
+                status=pb.OPERATION_STATUS_ALREADY_APPLIED,
+                error_code="",
+                error_message="",
+                evidence_snapshot_id=evidence_id,
+            )
+
+        # Rewrite with cast (works for widening + non-widening if cast is feasible)
+        exprs = []
+        for c in df.columns:
+            if c == column_name:
+                exprs.append(df[c].cast(target_spark_type).alias(c))
+            else:
+                exprs.append(df[c])
+        out = df.select(*exprs)
+
+        (out.write
+         .format("delta")
+         .mode("overwrite")
+         .option("overwriteSchema", "true")
+         .save(path))
+
+        return pb.OperationResult(
+            correlation_id=operation.correlation_id,
+            plan_id=operation.plan_id,
+            idempotency_key=operation.idempotency_key,
+            status=pb.OPERATION_STATUS_OK,
+            error_code="",
+            error_message="",
+            evidence_snapshot_id=evidence_id,
+        )
+    except Exception as exc:
+        return pb.OperationResult(
+            correlation_id=operation.correlation_id,
+            plan_id=operation.plan_id,
+            idempotency_key=operation.idempotency_key,
+            status=pb.OPERATION_STATUS_PERMANENT_ERROR,
+            error_code="DELTA_CHANGE_TYPE_FAILED",
+            error_message=str(exc),
+            evidence_snapshot_id=evidence_id,
+        )
+
+
 def _get_spark():
     """
     Lazily create and cache a Spark session for the gRPC server.
@@ -478,8 +744,7 @@ def _handle_change_type_delta(operation: pb.Operation) -> pb.OperationResult:
 def _handle_change_type(operation: pb.Operation) -> pb.OperationResult:
     if LAKE_TYPE == "rdbms":
         return _handle_change_type_rdbms(operation)
-    else:
-        return _handle_change_type_delta(operation)
+    return _handle_change_type_delta(operation)
 
 
 # ---------------------------------------------------------------------------
@@ -644,6 +909,8 @@ class LakeHandlerService(pb_grpc.LakeHandlerServicer):
                 result = _handle_add_column(op)
             elif op.kind == pb.OPERATION_CHANGE_TYPE:
                 result = _handle_change_type(op)
+            elif op.kind == pb.OPERATION_DROP_COLUMN:
+                result = _handle_drop_column(op)
             else:
                 msg = f"Operation kind {kind_name} not supported by LakeHandler"
                 log.error(msg)

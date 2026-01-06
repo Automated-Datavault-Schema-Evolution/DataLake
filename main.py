@@ -20,7 +20,7 @@ from config import (
     PROCESSING_MODE,
     KAFKA_STARTING_OFFSETS,
     KAFKA_GROUP_ID,
-    BACKLOG_BATCH_SIZE, CHECKPOINT_LOCATION, )
+    BACKLOG_BATCH_SIZE, CHECKPOINT_LOCATION, LAKE_TYPE, )
 from utils.kafka_utils import get_kafka_consumer, sanity_check_kafka, get_topic_backlog
 from utils.lake_utils import write_to_delta, store_to_rdbms, ensure_postgres_ready
 from utils.parse_utils import parse_message_to_row
@@ -165,11 +165,12 @@ def process_batch(batch_df, batch_id):
         log.info(f"Writing {n} rows to Delta table '{table_name}' at {delta_path}")
         write_to_delta(local_df, delta_path)
 
-        # Optional fan-out to RDBMS
-        try:
-            store_to_rdbms(table_name, local_df)
-        except Exception as e:
-            log.error(f"store_to_rdbms failed for '{table_name}': {e}")
+        # Fan-out to RDBMS ONLY when configured
+        if LAKE_TYPE == "rdbms":
+            try:
+                store_to_rdbms(table_name, local_df)
+            except Exception as e:
+                log.error(f"store_to_rdbms failed for '{table_name}': {e}")
 
         total_written += n
 
@@ -291,12 +292,12 @@ def bulk_ingest(spark, max_messages=None):
                     log.info(f"[{table_name}] Writing {n} rows to Delta path {delta_path}")
                     write_to_delta(df_tbl, delta_path)
 
-                    # optional RDBMS fan-out (per-table)
-                    try:
-                        log.info(f"▶ store_to_rdbms for '{table_name}' ... ")
-                        store_to_rdbms(table_name, df_tbl)
-                    except Exception as e:
-                        log.error(f"store_to_rdbms failed for '{table_name}': {e}")
+                    # Fan-out to RDBMS ONLY when configured
+                    if LAKE_TYPE == "rdbms":
+                        try:
+                            store_to_rdbms(table_name, df_tbl)
+                        except Exception as e:
+                            log.error(f"store_to_rdbms failed for '{table_name}': {e}")
 
                     poll_rows_written += n
                     total_rows_written += n
@@ -414,7 +415,8 @@ def schedule_bulk(spark):
 
 def main():
     with log_step("Starting Delta Lake Handler"):
-        ensure_postgres_ready()
+        if LAKE_TYPE == "rdbms":
+            ensure_postgres_ready()
         spark = get_spark_session()
         sanity_check_kafka()
 
