@@ -4,6 +4,7 @@
 *.env
 .env
 delta_files/*
+.e2e/*
 
 
 ### Python template
@@ -170,3 +171,4 @@ cython_debug/
 
 !/delta_files/
 !/delta_files/
+!/.e2e/
