@@ -20,6 +20,52 @@ from utils.spark_utiils import get_spark_session
 _SPARK = None
 
 
+def _rdbms_table_exists(cur, schema_name: str, table_name: str) -> bool:
+    cur.execute(
+        """
+        SELECT 1
+        FROM information_schema.tables
+        WHERE table_schema = %s
+          AND table_name = %s LIMIT 1
+        """,
+        (schema_name, table_name),
+    )
+    return cur.fetchone() is not None
+
+
+def _is_missing_relation_error(exc: Exception) -> bool:
+    """Return True when the DB reports the table/relation does not exist."""
+    # psycopg2 sets pgcode; 42P01 = undefined_table
+    pgcode = getattr(exc, "pgcode", None)
+    if not pgcode and hasattr(exc, "orig"):
+        pgcode = getattr(exc.orig, "pgcode", None)
+    if pgcode == "42P01":
+        return True
+
+    msg = str(exc).lower()
+    if "does not exist" in msg and ("relation" in msg or "table" in msg):
+        return True
+    return False
+
+
+def _is_transient_db_error(exc: Exception) -> bool:
+    """Best-effort classification for transient connectivity issues."""
+    msg = str(exc).lower()
+    transient_markers = [
+        "could not connect",
+        "connection refused",
+        "connection reset",
+        "terminating connection",
+        "the database system is starting up",
+        "timeout",
+        "timed out",
+        "temporary failure",
+        "no route to host",
+        "server closed the connection",
+    ]
+    return any(m in msg for m in transient_markers)
+
+
 def _handle_drop_column_rdbms(operation: pb.Operation) -> pb.OperationResult:
     params = dict(operation.params)
     table_name = operation.target or params.get("table_name")
@@ -476,13 +522,21 @@ def _handle_add_column_delta(operation: pb.Operation) -> pb.OperationResult:
 
 
 def _handle_add_column_rdbms(operation: pb.Operation) -> pb.OperationResult:
-    """
-    Apply ADD_COLUMN to a PostgreSQL-backed lake table.
-    """
     params = dict(operation.params)
-    column_name = params.get("column_name")
-    logical_type = params.get("logical_type")
+    table_name = operation.target or params.get("table_name")
+    column_name = params.get("column_name") or params.get("attribute")
+    logical_type = params.get("to_logical_type") or params.get("logical_type")
+    schema_name = params.get("schema_name") or "public"
 
+    if not table_name:
+        return pb.OperationResult(
+            correlation_id=operation.correlation_id,
+            plan_id=operation.plan_id,
+            idempotency_key=operation.idempotency_key,
+            status=pb.OPERATION_STATUS_PERMANENT_ERROR,
+            error_code="MISSING_TARGET",
+            error_message="target (table_name) is required for OPERATION_ADD_COLUMN",
+        )
     if not column_name:
         return pb.OperationResult(
             correlation_id=operation.correlation_id,
@@ -493,52 +547,53 @@ def _handle_add_column_rdbms(operation: pb.Operation) -> pb.OperationResult:
             error_message="column_name parameter is required for OPERATION_ADD_COLUMN",
         )
 
-    table_name = operation.target or params.get("table_name")
-    if not table_name:
-        return pb.OperationResult(
-            correlation_id=operation.correlation_id,
-            plan_id=operation.plan_id,
-            idempotency_key=operation.idempotency_key,
-            status=pb.OPERATION_STATUS_PERMANENT_ERROR,
-            error_code="MISSING_TARGET",
-            error_message="target (table_name) is required for OPERATION_ADD_COLUMN",
-        )
-
-    # Parse optional schema in table_name
-    if "." in table_name:
-        schema_name, tbl_name = table_name.split(".", 1)
-    else:
-        schema_name, tbl_name = "public", table_name
-
-    pg_type = _map_logical_to_pg_type(logical_type)
     evidence_id = _make_evidence_id(operation)
 
-    with log_step(f"LakeHandler ADD_COLUMN (RDBMS) for {schema_name}.{tbl_name}"):
-        conn = None
-        try:
-            conn = get_postgres_connection()
-            cur = conn.cursor()
+    # best-effort logical -> SQL mapping (kept intentionally small)
+    type_map = {
+        "string": "TEXT",
+        "text": "TEXT",
+        "integer": "INTEGER",
+        "int": "INTEGER",
+        "bigint": "BIGINT",
+        "float": "DOUBLE PRECISION",
+        "double": "DOUBLE PRECISION",
+        "boolean": "BOOLEAN",
+        "bool": "BOOLEAN",
+        "timestamp": "TIMESTAMP",
+        "timestamptz": "TIMESTAMPTZ",
+        "date": "DATE",
+    }
+    sql_type = type_map.get(str(logical_type).strip().lower(), "TEXT") if logical_type else "TEXT"
 
-            # Check if column already exists
+    conn = None
+    try:
+        conn = get_postgres_connection()
+        with conn.cursor() as cur:
+            # If ingestion hasn't created the table yet, treat as transient.
+            if not _rdbms_table_exists(cur, schema_name, table_name):
+                return pb.OperationResult(
+                    correlation_id=operation.correlation_id,
+                    plan_id=operation.plan_id,
+                    idempotency_key=operation.idempotency_key,
+                    status=pb.OPERATION_STATUS_TRANSIENT_ERROR,
+                    error_code="RDBMS_TABLE_NOT_READY",
+                    error_message=f"Table {schema_name}.{table_name} not found yet",
+                    evidence_snapshot_id=evidence_id,
+                )
+
+            # Idempotency: if column already exists, report ALREADY_APPLIED.
             cur.execute(
                 """
                 SELECT 1
                 FROM information_schema.columns
                 WHERE table_schema = %s
                   AND table_name = %s
-                  AND column_name = %s
+                  AND column_name = %s LIMIT 1
                 """,
-                (schema_name, tbl_name, column_name),
+                (schema_name, table_name, column_name),
             )
-            if cur.fetchone():
-                log.info(
-                    "Column %s already exists in %s.%s; treating as ALREADY_APPLIED",
-                    column_name,
-                    schema_name,
-                    tbl_name,
-                )
-                cur.close()
-                conn.commit()
+            if cur.fetchone() is not None:
                 return pb.OperationResult(
                     correlation_id=operation.correlation_id,
                     plan_id=operation.plan_id,
@@ -549,44 +604,48 @@ def _handle_add_column_rdbms(operation: pb.Operation) -> pb.OperationResult:
                     evidence_snapshot_id=evidence_id,
                 )
 
-            # Build and execute ALTER TABLE
-            ident_schema = '"' + schema_name.replace('"', '""') + '"'
-            ident_table = '"' + tbl_name.replace('"', '""') + '"'
-            ident_col = '"' + column_name.replace('"', '""') + '"'
-            alter_sql = f"ALTER TABLE {ident_schema}.{ident_table} ADD COLUMN {ident_col} {pg_type}"
+            cur.execute(
+                f'ALTER TABLE "{schema_name}"."{table_name}" ADD COLUMN "{column_name}" {sql_type}'
+            )
+        conn.commit()
 
-            log.info("Executing PostgreSQL ALTER TABLE: %s", alter_sql)
-            cur.execute(alter_sql)
-            cur.close()
-            conn.commit()
+        return pb.OperationResult(
+            correlation_id=operation.correlation_id,
+            plan_id=operation.plan_id,
+            idempotency_key=operation.idempotency_key,
+            status=pb.OPERATION_STATUS_OK,
+            error_code="",
+            error_message="",
+            evidence_snapshot_id=evidence_id,
+        )
 
-            status = pb.OPERATION_STATUS_OK
-            error_code = ""
-            error_message = ""
+    except Exception as exc:
+        if conn:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
 
-        except Exception as exc:
-            log.exception("PostgreSQL ALTER TABLE failed for %s.%s: %s", schema_name, tbl_name, exc)
-            if conn:
-                try:
-                    conn.rollback()
-                except Exception:
-                    pass
+        # Classify missing table / transient connectivity as transient to allow retries.
+        if _is_missing_relation_error(exc) or _is_transient_db_error(exc):
+            status = pb.OPERATION_STATUS_TRANSIENT_ERROR
+            error_code = "RDBMS_ADD_COLUMN_TRANSIENT"
+        else:
             status = pb.OPERATION_STATUS_PERMANENT_ERROR
-            error_code = "RDBMS_ALTER_FAILED"
-            error_message = str(exc)
-        finally:
-            if conn:
-                release_postgres_connection(conn)
+            error_code = "RDBMS_ADD_COLUMN_FAILED"
 
-    return pb.OperationResult(
-        correlation_id=operation.correlation_id,
-        plan_id=operation.plan_id,
-        idempotency_key=operation.idempotency_key,
-        status=status,
-        error_code=error_code,
-        error_message=error_message,
-        evidence_snapshot_id=evidence_id,
-    )
+        return pb.OperationResult(
+            correlation_id=operation.correlation_id,
+            plan_id=operation.plan_id,
+            idempotency_key=operation.idempotency_key,
+            status=status,
+            error_code=error_code,
+            error_message=str(exc),
+            evidence_snapshot_id=evidence_id,
+        )
+    finally:
+        if conn:
+            release_postgres_connection(conn)
 
 
 def _handle_add_column(operation: pb.Operation) -> pb.OperationResult:
@@ -601,20 +660,11 @@ def _handle_add_column(operation: pb.Operation) -> pb.OperationResult:
 
 def _handle_change_type_rdbms(operation: pb.Operation) -> pb.OperationResult:
     params = dict(operation.params)
-    column_name = params.get("column_name")
-    logical_type = params.get("to_logical_type") or params.get("logical_type")
-
-    if not column_name:
-        return pb.OperationResult(
-            correlation_id=operation.correlation_id,
-            plan_id=operation.plan_id,
-            idempotency_key=operation.idempotency_key,
-            status=pb.OPERATION_STATUS_PERMANENT_ERROR,
-            error_code="MISSING_PARAM",
-            error_message="column_name parameter is required for OPERATION_CHANGE_TYPE",
-        )
-
     table_name = operation.target or params.get("table_name")
+    column_name = params.get("column_name") or params.get("attribute")
+    to_logical_type = params.get("to_logical_type") or params.get("logical_type")
+    schema_name = params.get("schema_name") or "public"
+
     if not table_name:
         return pb.OperationResult(
             correlation_id=operation.correlation_id,
@@ -624,108 +674,130 @@ def _handle_change_type_rdbms(operation: pb.Operation) -> pb.OperationResult:
             error_code="MISSING_TARGET",
             error_message="target (table_name) is required for OPERATION_CHANGE_TYPE",
         )
+    if not column_name or not to_logical_type:
+        return pb.OperationResult(
+            correlation_id=operation.correlation_id,
+            plan_id=operation.plan_id,
+            idempotency_key=operation.idempotency_key,
+            status=pb.OPERATION_STATUS_PERMANENT_ERROR,
+            error_code="MISSING_PARAM",
+            error_message="column_name and to_logical_type are required for OPERATION_CHANGE_TYPE",
+        )
 
-    if "." in table_name:
-        schema_name, tbl_name = table_name.split(".", 1)
-    else:
-        schema_name, tbl_name = "public", table_name
-
-    pg_type = _map_logical_to_pg_type(logical_type)
     evidence_id = _make_evidence_id(operation)
 
-    with log_step(f"LakeHandler CHANGE_TYPE (RDBMS) for {schema_name}.{tbl_name}.{column_name}"):
-        conn = None
-        try:
-            conn = get_postgres_connection()
-            cur = conn.cursor()
+    type_map = {
+        "string": "TEXT",
+        "text": "TEXT",
+        "integer": "INTEGER",
+        "int": "INTEGER",
+        "bigint": "BIGINT",
+        "float": "DOUBLE PRECISION",
+        "double": "DOUBLE PRECISION",
+        "boolean": "BOOLEAN",
+        "bool": "BOOLEAN",
+        "timestamp": "TIMESTAMP",
+        "timestamptz": "TIMESTAMPTZ",
+        "date": "DATE",
+    }
+    sql_type = type_map.get(str(to_logical_type).strip().lower(), "TEXT")
 
+    conn = None
+    try:
+        conn = get_postgres_connection()
+        with conn.cursor() as cur:
+            # If table not created yet, treat as transient.
+            if not _rdbms_table_exists(cur, schema_name, table_name):
+                return pb.OperationResult(
+                    correlation_id=operation.correlation_id,
+                    plan_id=operation.plan_id,
+                    idempotency_key=operation.idempotency_key,
+                    status=pb.OPERATION_STATUS_TRANSIENT_ERROR,
+                    error_code="RDBMS_TABLE_NOT_READY",
+                    error_message=f"Table {schema_name}.{table_name} not found yet",
+                    evidence_snapshot_id=evidence_id,
+                )
+
+            # Column existence can lag schema application; treat as transient.
             cur.execute(
                 """
-                SELECT udt_name
+                SELECT 1
                 FROM information_schema.columns
                 WHERE table_schema = %s
                   AND table_name = %s
-                  AND column_name = %s
+                  AND column_name = %s LIMIT 1
                 """,
-                (schema_name, tbl_name, column_name),
+                (schema_name, table_name, column_name),
             )
-            row = cur.fetchone()
-            if not row:
-                cur.close()
-                conn.commit()
+            if cur.fetchone() is None:
                 return pb.OperationResult(
                     correlation_id=operation.correlation_id,
                     plan_id=operation.plan_id,
                     idempotency_key=operation.idempotency_key,
-                    status=pb.OPERATION_STATUS_PERMANENT_ERROR,
-                    error_code="COLUMN_NOT_FOUND",
-                    error_message=f"Column {column_name} not found in {schema_name}.{tbl_name}",
+                    status=pb.OPERATION_STATUS_TRANSIENT_ERROR,
+                    error_code="RDBMS_COLUMN_NOT_READY",
+                    error_message=f"Column {column_name} not found yet on {schema_name}.{table_name}",
                     evidence_snapshot_id=evidence_id,
                 )
 
-            current_udt = (row[0] or "").lower()
-            comparable = current_udt
-            if comparable in {"varchar", "bpchar"}:
-                comparable = "text"
-            if comparable == "int4":
-                comparable = "integer"
-            if comparable == "int8":
-                comparable = "bigint"
-            if comparable == "float8":
-                comparable = "double precision"
-
-            if comparable == pg_type.lower():
-                cur.close()
-                conn.commit()
-                return pb.OperationResult(
-                    correlation_id=operation.correlation_id,
-                    plan_id=operation.plan_id,
-                    idempotency_key=operation.idempotency_key,
-                    status=pb.OPERATION_STATUS_ALREADY_APPLIED,
-                    error_code="",
-                    error_message="",
-                    evidence_snapshot_id=evidence_id,
-                )
-
+                # Minimal fix: always use explicit USING cast for type changes.
+                # This avoids Postgres errors like "cannot be cast automatically ... specify USING".
             ident_schema = '"' + schema_name.replace('"', '""') + '"'
-            ident_table = '"' + tbl_name.replace('"', '""') + '"'
+            ident_table = '"' + table_name.replace('"', '""') + '"'
             ident_col = '"' + column_name.replace('"', '""') + '"'
 
-            alter_sql = (
+            target_type = str(sql_type).upper()
+            numeric_types = {"INTEGER", "BIGINT", "DOUBLE PRECISION", "NUMERIC", "REAL", "DOUBLE"}
+
+            if target_type in numeric_types:
+                using_expr = f"NULLIF({ident_col}, '')::{sql_type}"
+            else:
+                using_expr = f"{ident_col}::{sql_type}"
+
+            cur.execute(
                 f"ALTER TABLE {ident_schema}.{ident_table} "
-                f"ALTER COLUMN {ident_col} TYPE {pg_type} "
-                f"USING {ident_col}::{pg_type}"
+                f"ALTER COLUMN {ident_col} TYPE {sql_type} "
+                f"USING {using_expr}"
             )
-            cur.execute(alter_sql)
-            cur.close()
-            conn.commit()
 
-            status = pb.OPERATION_STATUS_OK
-            error_code = ""
-            error_message = ""
+        conn.commit()
 
-        except Exception as exc:
-            if conn:
-                try:
-                    conn.rollback()
-                except Exception:
-                    pass
+        return pb.OperationResult(
+            correlation_id=operation.correlation_id,
+            plan_id=operation.plan_id,
+            idempotency_key=operation.idempotency_key,
+            status=pb.OPERATION_STATUS_OK,
+            error_code="",
+            error_message="",
+            evidence_snapshot_id=evidence_id,
+        )
+
+    except Exception as exc:
+        if conn:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+
+        if _is_missing_relation_error(exc) or _is_transient_db_error(exc):
+            status = pb.OPERATION_STATUS_TRANSIENT_ERROR
+            error_code = "RDBMS_CHANGE_TYPE_TRANSIENT"
+        else:
             status = pb.OPERATION_STATUS_PERMANENT_ERROR
-            error_code = "RDBMS_ALTER_FAILED"
-            error_message = str(exc)
-        finally:
-            if conn:
-                release_postgres_connection(conn)
+            error_code = "RDBMS_CHANGE_TYPE_FAILED"
 
-    return pb.OperationResult(
-        correlation_id=operation.correlation_id,
-        plan_id=operation.plan_id,
-        idempotency_key=operation.idempotency_key,
-        status=status,
-        error_code=error_code,
-        error_message=error_message,
-        evidence_snapshot_id=evidence_id,
-    )
+        return pb.OperationResult(
+            correlation_id=operation.correlation_id,
+            plan_id=operation.plan_id,
+            idempotency_key=operation.idempotency_key,
+            status=status,
+            error_code=error_code,
+            error_message=str(exc),
+            evidence_snapshot_id=evidence_id,
+        )
+    finally:
+        if conn:
+            release_postgres_connection(conn)
 
 
 def _handle_change_type_delta(operation: pb.Operation) -> pb.OperationResult:

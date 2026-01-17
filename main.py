@@ -72,7 +72,7 @@ def process_batch(batch_df, batch_id):
     “global” columns by accident.
     """
     from pyspark.sql import functions as F
-    from pyspark.sql import Row
+    # from pyspark.sql import Row
 
     spark = batch_df.sparkSession
 
@@ -126,9 +126,14 @@ def process_batch(batch_df, batch_id):
         normalized = [{c: r.get(c) for c in colset} for r in tbl_rows]
 
         # Build a DF from normalized rows
-        spark_rows = [Row(**{c: (None if v == "" else v) for c, v in rec.items()})
-                      for rec in normalized]
-        local_df = spark.createDataFrame(spark_rows)
+        # spark_rows = [Row(**{c: (None if v == "" else v) for c, v in rec.items()})
+        #               for rec in normalized]
+        # local_df = spark.createDataFrame(spark_rows)
+        cleaned_rows = [
+            {c: (None if v == "" else v) for c, v in rec.items()}
+            for rec in normalized
+        ]
+        local_df = build_typed_df_from_rows(spark, cleaned_rows)
 
         # --- inline, safe date casting (NO new columns are created) ---
         # Only cast columns that actually exist and look like dates by name.
