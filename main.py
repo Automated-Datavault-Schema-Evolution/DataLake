@@ -67,29 +67,31 @@ def _table_name_from_filename_col(col):
 def process_batch(batch_df, batch_id):
     """
     Build per-table micro-batch DataFrames strictly from the keys present
-    in that table's records. We *hard scope* the final projection to only
-    those keys (plus ingestion_timestamp) so no helper can introduce
-    “global” columns by accident.
+    in that table's records.
+
+    Parquet/Delta mode MUST:
+      - write into lowercased physical table dirs (DV expects lowercased names)
+      - keep inferred types (do NOT cast everything to string), otherwise
+        type-widening cannot work.
+
+    RDBMS mode behavior remains unchanged.
     """
     from pyspark.sql import functions as F
-    # from pyspark.sql import Row
 
     spark = batch_df.sparkSession
-
     log.debug(f"process_batch: batch_id={batch_id}, incoming columns={batch_df.columns}")
 
     # 1) Ensure we have one-record-per-row map as column "row"
     if "row" in batch_df.columns and "data" not in batch_df.columns:
-        df = batch_df  # already flattened upstream
+        df = batch_df
     elif "data" in batch_df.columns and "row" not in batch_df.columns:
         df = batch_df.withColumn("row", F.explode_outer(F.col("data"))).drop("data")
     else:
         raise ValueError(
-            f"process_batch expected either 'row' (map) or 'data' (array<map>). "
-            f"Got columns: {batch_df.columns}"
+            f"process_batch expected either 'row' (map) or 'data' (array<map>). Got columns: {batch_df.columns}"
         )
 
-    # 2) Derive table name from filename (basename without extension)
+    # 2) Derive logical table name from filename (basename without extension)
     df = df.withColumn(
         "table_name",
         F.regexp_extract(F.col("filename"), r"([^/\\]+?)(?:\.[^.]+)?$", 1)
@@ -113,69 +115,66 @@ def process_batch(batch_df, batch_id):
         payload = dict(m) if m is not None else {}
         rows_by_table[tbl].append(payload)
 
-    # 4) Write each table independently (infer columns strictly per table)
     total_written = 0
-    for table_name, tbl_rows in rows_by_table.items():
-        # infer columns for THIS table only
+
+    for logical_table_name, tbl_rows in rows_by_table.items():
         colset = [c for c in sorted({k for r in tbl_rows for k in (r.keys() if r else [])})]
         if not colset:
-            log.info(f"process_batch: table '{table_name}' has no materialized keys in this batch.")
+            log.info(f"process_batch: table '{logical_table_name}' has no materialized keys in this batch.")
             continue
 
-        # normalize rows to same key set
-        normalized = [{c: r.get(c) for c in colset} for r in tbl_rows]
-
-        # Build a DF from normalized rows
-        # spark_rows = [Row(**{c: (None if v == "" else v) for c, v in rec.items()})
-        #               for rec in normalized]
-        # local_df = spark.createDataFrame(spark_rows)
         cleaned_rows = [
-            {c: (None if v == "" else v) for c, v in rec.items()}
-            for rec in normalized
+            {c: (None if r.get(c) == "" else r.get(c)) for c in colset}
+            for r in tbl_rows
         ]
+
         local_df = build_typed_df_from_rows(spark, cleaned_rows)
 
-        # --- inline, safe date casting (NO new columns are created) ---
-        # Only cast columns that actually exist and look like dates by name.
+        # Inline safe date casting by name (no new columns)
         dateish = [c for c in colset if c.lower().endswith("date") or c.lower() in {"dob", "dateofbirth"}]
         for c in dateish:
-            # try cast strings like 'YYYY-MM-DD' to date
             local_df = local_df.withColumn(
                 c,
                 F.when(F.col(c).cast("string").rlike(r"^\d{4}-\d{2}-\d{2}$"), F.to_date(F.col(c)))
                 .otherwise(F.col(c))
             )
 
-        # Add ingestion_timestamp (computed now) and keep only intended columns
+        # Add ingestion timestamp
         local_df = local_df.withColumn("ingestion_timestamp", F.current_timestamp())
 
-        # Cast non-date/timestamp to string for consistency, but *only* inside the final projection
-        final_cols = colset + ["ingestion_timestamp"]
-        select_exprs = []
-        dtypes = dict(local_df.dtypes)
-        for c in final_cols:
-            t = dtypes.get(c)
-            if c == "ingestion_timestamp" or t in ("date", "timestamp"):
-                select_exprs.append(F.col(c))
-            else:
-                select_exprs.append(F.col(c).cast("string").alias(c))
-        local_df = local_df.select(*select_exprs)
+        # RDBMS mode: keep existing behavior (string-cast non-date/timestamp)
+        if LAKE_TYPE == "rdbms":
+            final_cols = colset + ["ingestion_timestamp"]
+            select_exprs = []
+            dtypes = dict(local_df.dtypes)
+            for c in final_cols:
+                t = dtypes.get(c)
+                if c == "ingestion_timestamp" or t in ("date", "timestamp"):
+                    select_exprs.append(F.col(c))
+                else:
+                    select_exprs.append(F.col(c).cast("string").alias(c))
+            local_df = local_df.select(*select_exprs)
+            physical_table = logical_table_name  # irrelevant for rdbms
+        else:
+            # Parquet/Delta mode: keep inferred types + enforce lowercased physical dirs
+            final_cols = colset + ["ingestion_timestamp"]
+            local_df = local_df.select(*[F.col(c) for c in final_cols])
+            physical_table = str(logical_table_name or "").strip().lower()
 
-        # Log the per-table, per-batch column list we will actually write
-        log.info(f"[process_batch] '{table_name}' final projected columns ({len(final_cols)}): {final_cols}")
+        log.info(f"[process_batch] '{logical_table_name}' final projected columns ({len(final_cols)}): {final_cols}")
 
-        # Delta write (append)
-        delta_path = f"{DELTA_PATH.rstrip('/')}/{table_name}"
-        n = local_df.count()  # single action for logging
-        log.info(f"Writing {n} rows to Delta table '{table_name}' at {delta_path}")
+        # Write to lake
+        delta_path = f"{DELTA_PATH.rstrip('/')}/{physical_table}" if LAKE_TYPE != "rdbms" else DELTA_PATH
+        n = local_df.count()
+        log.info(f"Writing {n} rows to lake table '{logical_table_name}' at {delta_path}")
         write_to_delta(local_df, delta_path)
 
-        # Fan-out to RDBMS ONLY when configured
+        # Fan-out to Postgres ONLY when configured
         if LAKE_TYPE == "rdbms":
             try:
-                store_to_rdbms(table_name, local_df)
+                store_to_rdbms(logical_table_name, local_df)
             except Exception as e:
-                log.error(f"store_to_rdbms failed for '{table_name}': {e}")
+                log.error(f"store_to_rdbms failed for '{logical_table_name}': {e}")
 
         total_written += n
 
@@ -292,10 +291,11 @@ def bulk_ingest(spark, max_messages=None):
                     df_tbl = df_tbl.coalesce(max(1, min(8, num_parts)))
 
                     # write to Delta per-table
-                    delta_path = f"{DELTA_PATH.rstrip('/')}/{table_name}"
-                    n = df_tbl.count()  # trigger once; useful for logging/metrics
-                    log.info(f"[{table_name}] Writing {n} rows to Delta path {delta_path}")
-                    write_to_delta(df_tbl, delta_path)
+                    delta_root = DELTA_PATH.rstrip('/')
+                    target_path = f"{delta_root}/{table_name}"
+                    n = df_tbl.count()
+                    log.info(f"[{table_name}] Writing {n} rows to Delta path {target_path}")
+                    write_to_delta(df_tbl, delta_root, table_name=table_name)
 
                     # Fan-out to RDBMS ONLY when configured
                     if LAKE_TYPE == "rdbms":

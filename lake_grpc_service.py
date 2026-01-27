@@ -20,6 +20,17 @@ from utils.spark_utiils import get_spark_session
 _SPARK = None
 
 
+def _normalize_table_name(name: str) -> str:
+    """
+    For Delta mode, normalize to the same physical naming used by the writer:
+    - replace dots/dashes with underscores
+    - lower-case to match Hive/Spark identifier normalization
+    For rdbms mode, do NOT force lowercase (avoid breaking existing behavior).
+    """
+    safe = _sanitize_table_name(name)
+    return safe if LAKE_TYPE == "rdbms" else safe.lower()
+
+
 def _rdbms_table_exists(cur, schema_name: str, table_name: str) -> bool:
     cur.execute(
         """
@@ -244,8 +255,10 @@ def _handle_drop_column(operation: pb.Operation) -> pb.OperationResult:
 def _handle_change_type_delta(operation: pb.Operation) -> pb.OperationResult:
     params = dict(operation.params)
     table_name = operation.target or params.get("table_name")
-    column_name = params.get("column_name") or params.get("attribute")
+    column_name = params.get("column_name")
     to_logical_type = params.get("to_logical_type") or params.get("logical_type")
+
+    evidence_id = _make_evidence_id(operation)
 
     if not table_name:
         return pb.OperationResult(
@@ -255,6 +268,7 @@ def _handle_change_type_delta(operation: pb.Operation) -> pb.OperationResult:
             status=pb.OPERATION_STATUS_PERMANENT_ERROR,
             error_code="MISSING_TARGET",
             error_message="target (table_name) is required for OPERATION_CHANGE_TYPE",
+            evidence_snapshot_id=evidence_id,
         )
     if not column_name or not to_logical_type:
         return pb.OperationResult(
@@ -264,28 +278,72 @@ def _handle_change_type_delta(operation: pb.Operation) -> pb.OperationResult:
             status=pb.OPERATION_STATUS_PERMANENT_ERROR,
             error_code="MISSING_PARAM",
             error_message="column_name and to_logical_type are required for OPERATION_CHANGE_TYPE",
-        )
-
-    evidence_id = _make_evidence_id(operation)
-    spark = _get_spark()
-    path = _delta_table_path(table_name)
-
-    if not _delta_exists(spark, path):
-        return pb.OperationResult(
-            correlation_id=operation.correlation_id,
-            plan_id=operation.plan_id,
-            idempotency_key=operation.idempotency_key,
-            status=pb.OPERATION_STATUS_TRANSIENT_ERROR,
-            error_code="DELTA_NOT_FOUND",
-            error_message=f"Delta table not found at {path}",
             evidence_snapshot_id=evidence_id,
         )
 
-    target_spark_type = _map_logical_to_spark_type(to_logical_type)
+    spark = _get_spark()
+    table_name_norm = _normalize_table_name(table_name)
+    path = f"{DELTA_PATH.rstrip('/')}/{table_name_norm}"
 
-    try:
-        df = spark.read.format("delta").load(path)
-        if column_name not in df.columns:
+    def _norm(t: str) -> str:
+        t = (t or "").strip().lower()
+        if t in ("int", "integer"):
+            return "integer"
+        if t == "long":
+            return "bigint"
+        if t.startswith("decimal"):
+            return "decimal"
+        return t
+
+    target_type = _norm(_map_logical_to_spark_type(to_logical_type))
+
+    with log_step(f"LakeHandler CHANGE_TYPE (Delta) for table '{table_name}' at path '{path}'"):
+        # Delta table may not exist yet (race with initial ingestion) -> transient
+        if not _delta_exists(spark, path):
+            msg = f"Delta table not ready at path: {path}"
+            log.warning(msg)
+            return pb.OperationResult(
+                correlation_id=operation.correlation_id,
+                plan_id=operation.plan_id,
+                idempotency_key=operation.idempotency_key,
+                status=pb.OPERATION_STATUS_TRANSIENT_ERROR,
+                error_code="DELTA_TABLE_NOT_READY",
+                error_message=msg,
+                evidence_snapshot_id=evidence_id,
+            )
+
+        try:
+            df = spark.read.format("delta").load(path)
+        except Exception as exc:
+            msg = f"Failed to read Delta table at {path}: {exc}"
+            log.warning(msg)
+            return pb.OperationResult(
+                correlation_id=operation.correlation_id,
+                plan_id=operation.plan_id,
+                idempotency_key=operation.idempotency_key,
+                status=pb.OPERATION_STATUS_TRANSIENT_ERROR,
+                error_code="DELTA_READ_TRANSIENT",
+                error_message=msg,
+                evidence_snapshot_id=evidence_id,
+            )
+
+        field = next((f for f in df.schema.fields if f.name.lower() == str(column_name).strip().lower()), None)
+
+        if field is None:
+            msg = f"Column {column_name} not ready on Delta table {table_name}"
+            log.warning(msg)
+            return pb.OperationResult(
+                correlation_id=operation.correlation_id,
+                plan_id=operation.plan_id,
+                idempotency_key=operation.idempotency_key,
+                status=pb.OPERATION_STATUS_TRANSIENT_ERROR,
+                error_code="DELTA_COLUMN_NOT_READY",
+                error_message=msg,
+                evidence_snapshot_id=evidence_id,
+            )
+
+        current_type = _norm(field.dataType.simpleString())
+        if current_type == target_type or (current_type.startswith("decimal") and target_type == "decimal"):
             return pb.OperationResult(
                 correlation_id=operation.correlation_id,
                 plan_id=operation.plan_id,
@@ -296,40 +354,82 @@ def _handle_change_type_delta(operation: pb.Operation) -> pb.OperationResult:
                 evidence_snapshot_id=evidence_id,
             )
 
-        # Rewrite with cast (works for widening + non-widening if cast is feasible)
-        exprs = []
-        for c in df.columns:
-            if c == column_name:
-                exprs.append(df[c].cast(target_spark_type).alias(c))
-            else:
-                exprs.append(df[c])
-        out = df.select(*exprs)
+        # Try Spark/Delta ALTER syntaxes first
+        col_ident = "`" + str(column_name).replace("`", "``") + "`"
+        ddl_errors = []
 
-        (out.write
-         .format("delta")
-         .mode("overwrite")
-         .option("overwriteSchema", "true")
-         .save(path))
+        ddl_1 = f"ALTER TABLE delta.`{path}` ALTER COLUMN {col_ident} TYPE {target_type}"
+        ddl_2 = f"ALTER TABLE delta.`{path}` CHANGE COLUMN {col_ident} {col_ident} {target_type}"
 
-        return pb.OperationResult(
-            correlation_id=operation.correlation_id,
-            plan_id=operation.plan_id,
-            idempotency_key=operation.idempotency_key,
-            status=pb.OPERATION_STATUS_OK,
-            error_code="",
-            error_message="",
-            evidence_snapshot_id=evidence_id,
-        )
-    except Exception as exc:
-        return pb.OperationResult(
-            correlation_id=operation.correlation_id,
-            plan_id=operation.plan_id,
-            idempotency_key=operation.idempotency_key,
-            status=pb.OPERATION_STATUS_PERMANENT_ERROR,
-            error_code="DELTA_CHANGE_TYPE_FAILED",
-            error_message=str(exc),
-            evidence_snapshot_id=evidence_id,
-        )
+        for ddl in (ddl_1, ddl_2):
+            try:
+                log.info("Executing Delta ALTER TABLE: %s", ddl)
+                spark.sql(ddl)
+                return pb.OperationResult(
+                    correlation_id=operation.correlation_id,
+                    plan_id=operation.plan_id,
+                    idempotency_key=operation.idempotency_key,
+                    status=pb.OPERATION_STATUS_OK,
+                    error_code="",
+                    error_message="",
+                    evidence_snapshot_id=evidence_id,
+                )
+            except Exception as exc:
+                ddl_errors.append(f"{ddl} -> {exc}")
+
+        # Fallback: Delta ALTER COLUMN not supported in this runtime for some changes (e.g. STRING->DOUBLE).
+        # Rewrite the table by casting the column and overwriting in-place.
+        try:
+            from pyspark.sql import functions as F
+
+            log.warning(
+                "Delta ALTER COLUMN failed; attempting rewrite-cast fallback for %s.%s: %s -> %s",
+                table_name_norm,
+                column_name,
+                current_type,
+                target_type,
+            )
+
+            casted = df.withColumn(str(column_name), F.col(str(column_name)).cast(target_type))
+
+            (casted.write
+             .format("delta")
+             .mode("overwrite")
+             .option("overwriteSchema", "true")
+             .save(path)
+             )
+
+            # Verify new schema
+            df_check = spark.read.format("delta").load(path)
+            new_field = next((f for f in df_check.schema.fields if f.name.lower() == str(column_name).strip().lower()),
+                             None)
+            if new_field is None:
+                raise RuntimeError(f"Post-rewrite schema missing column {column_name}")
+            new_type = _norm(new_field.dataType.simpleString())
+            if new_type != target_type and not (new_type.startswith("decimal") and target_type == "decimal"):
+                raise RuntimeError(f"Post-rewrite type mismatch: got={new_type} expected={target_type}")
+
+            return pb.OperationResult(
+                correlation_id=operation.correlation_id,
+                plan_id=operation.plan_id,
+                idempotency_key=operation.idempotency_key,
+                status=pb.OPERATION_STATUS_OK,
+                error_code="",
+                error_message="",
+                evidence_snapshot_id=evidence_id,
+            )
+
+        except Exception as exc:
+            ddl_errors.append(f"REWRITE_CAST -> {exc}")
+            return pb.OperationResult(
+                correlation_id=operation.correlation_id,
+                plan_id=operation.plan_id,
+                idempotency_key=operation.idempotency_key,
+                status=pb.OPERATION_STATUS_PERMANENT_ERROR,
+                error_code="DELTA_CHANGE_TYPE_FAILED",
+                error_message="; ".join(ddl_errors),
+                evidence_snapshot_id=evidence_id,
+            )
 
 
 def _get_spark():
@@ -354,14 +454,19 @@ def _make_evidence_id(operation: pb.Operation) -> str:
 
 def _sanitize_table_name(name: str) -> str:
     """
-    Mirror the sanitisation used in write_to_delta: replace dots/dashes with underscores.
+    Mirror the sanitisation used in write_to_delta.
+    In parquet mode we also lowercase, because DV/Spark side uses lowercased table identifiers.
     """
-    return name.replace(".", "_").replace("-", "_")
+    safe = (name or "").replace(".", "_").replace("-", "_")
+    if LAKE_TYPE != "rdbms":
+        safe = safe.lower()
+    return safe
 
 
 def _delta_table_path(table_name: str) -> str:
     """
     Compute the Delta path for a logical table name.
+    Must match the physical directory naming used by ingestion.
     """
     safe = _sanitize_table_name(table_name)
     return os.path.join(DELTA_PATH, safe)
@@ -464,15 +569,16 @@ def _handle_add_column_delta(operation: pb.Operation) -> pb.OperationResult:
 
     with log_step(f"LakeHandler ADD_COLUMN (Delta) for table '{table_name}' at path '{path}'"):
         if not _delta_exists(spark, path):
-            msg = f"Delta table path does not exist: {path}"
-            log.error(msg)
+            msg = f"Delta table not ready at path: {path}"
+            log.warning(msg)
             return pb.OperationResult(
                 correlation_id=operation.correlation_id,
                 plan_id=operation.plan_id,
                 idempotency_key=operation.idempotency_key,
-                status=pb.OPERATION_STATUS_PERMANENT_ERROR,
-                error_code="LAKE_TABLE_NOT_FOUND",
+                status=pb.OPERATION_STATUS_TRANSIENT_ERROR,
+                error_code="DELTA_TABLE_NOT_READY",
                 error_message=msg,
+                evidence_snapshot_id=_make_evidence_id(operation),
             )
 
         # Inspect existing schema
@@ -800,19 +906,6 @@ def _handle_change_type_rdbms(operation: pb.Operation) -> pb.OperationResult:
             release_postgres_connection(conn)
 
 
-def _handle_change_type_delta(operation: pb.Operation) -> pb.OperationResult:
-    kind_name = pb.OperationKind.Name(operation.kind)
-    return pb.OperationResult(
-        correlation_id=operation.correlation_id,
-        plan_id=operation.plan_id,
-        idempotency_key=operation.idempotency_key,
-        status=pb.OPERATION_STATUS_PERMANENT_ERROR,
-        error_code="UNSUPPORTED_BACKEND",
-        error_message=f"{kind_name} not implemented for Delta backend",
-        evidence_snapshot_id=_make_evidence_id(operation),
-    )
-
-
 def _handle_change_type(operation: pb.Operation) -> pb.OperationResult:
     if LAKE_TYPE == "rdbms":
         return _handle_change_type_rdbms(operation)
@@ -1004,7 +1097,7 @@ class LakeHandlerService(pb_grpc.LakeHandlerServicer):
             request: pb.EvidenceRequest,
             context: grpc.ServicerContext,
     ) -> pb.EvidenceResponse:
-        table_name = request.dataset_id
+        table_name = _normalize_table_name(request.dataset_id)
 
         log.info(
             "LakeHandler.IntrospectEvidence: plan_id=%s correlation_id=%s dataset_id=%s",

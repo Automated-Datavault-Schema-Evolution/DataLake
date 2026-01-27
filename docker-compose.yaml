@@ -16,6 +16,7 @@ services:
       - delta-jars:/opt/delta-jars:ro
       - ext-jars:/opt/ext-jars:ro
       - jdbc-driver:/opt/jdbc-jars:ro
+      - ${LAKE_STORE_DIR}:/lake
     networks:
       - data-automation-net
     environment:
@@ -81,6 +82,7 @@ services:
       - ${HOST_SPARK_SCRATCH}:${CONTAINER_SCRATCH_DIR}   # shuffle/tmp
       - delta-jars:/opt/delta-jars:ro
       - ext-jars:/opt/ext-jars:ro
+      - ${LAKE_STORE_DIR}:/lake
     ports:
       - "7077:7077"
       - "8080:8080"
@@ -125,6 +127,7 @@ services:
       - ${HOST_SPARK_SCRATCH}:${CONTAINER_SCRATCH_DIR}   # shuffle/tmp
       - delta-jars:/opt/delta-jars:ro
       - ext-jars:/opt/ext-jars:ro
+      - ${LAKE_STORE_DIR}:/lake
     logging:
       driver: "json-file"
       options:
@@ -175,6 +178,7 @@ services:
       - ${HOST_SPARK_SCRATCH}:${CONTAINER_SCRATCH_DIR}   # shuffle/tmp
       - delta-jars:/opt/delta-jars:ro
       - ext-jars:/opt/ext-jars:ro
+      - ${LAKE_STORE_DIR}:/lake
     logging:
       driver: "json-file"
       options:

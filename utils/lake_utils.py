@@ -4,7 +4,6 @@ from datetime import datetime
 from logger import log, log_step
 from psycopg2.extras import execute_values
 from psycopg2.pool import SimpleConnectionPool
-from pyspark.errors import AnalysisException
 from pyspark.sql import functions as F
 
 from config import (
@@ -13,74 +12,153 @@ from config import (
     POSTGRES_DB,
     POSTGRES_USER,
     POSTGRES_PASSWORD,
-    LAKE_TYPE, POSTGRES_POOL_MAX, POSTGRES_POOL_MIN,
+    POSTGRES_POOL_MAX, POSTGRES_POOL_MIN, LAKE_TYPE, DELTA_PATH,
 )
 
 # Global connection pool for PostgreSQL
 PG_POOL = None
 
 
-def write_to_delta(df, delta_path, partition_by=None):
-    """Write rows from a Spark DataFrame to Delta files and optionally Postgres.
-
-    When Spark batches combine several Kafka messages the resulting DataFrame may
-    contain rows for multiple source files. To avoid mixing their schemas, the
-    data is grouped by ``filename`` and each group is written separately.  If the
-    DataFrame only contains one filename the grouping step is skipped for
-    efficiency.
+def write_to_delta(df, delta_path, partition_by=None, table_name=None):
     """
+    Write rows from a Spark DataFrame to Delta files and optionally Postgres.
+
+    Compatibility goals (do NOT break existing callers):
+      - If df contains 'filename': split by filename and write per-file table directories
+      - If df has no 'filename':
+          * If caller passes table_name: write to delta_path/<table_name> UNLESS delta_path already ends with table_name
+          * If caller passes delta_path that is already the table directory: write directly to delta_path
+      - Never write a table directly into the lake root (DELTA_PATH) without a table directory.
+
+    Parquet/Delta mode:
+      - Normalize physical table directory names to lowercase for deterministic paths.
+    """
+    spark = getattr(df, "sparkSession", None)
+
+    if not isinstance(delta_path, (str, os.PathLike)) or not str(delta_path):
+        raise ValueError(f"write_to_delta: invalid delta_path={delta_path!r}")
+
+    if spark is None:
+        from pyspark.sql import SparkSession
+        spark = SparkSession.getActiveSession() or SparkSession.builder.getOrCreate()
+
+    lake_root_norm = os.path.normpath(str(DELTA_PATH))
+    delta_path_norm = os.path.normpath(str(delta_path))
+
+    def _sanitize_name(name: str) -> str:
+        n = (name or "").strip()
+        # strip optional schema
+        if "." in n:
+            n = n.split(".", 1)[-1]
+        n = n.strip('"').replace(".", "_").replace("-", "_")
+        return n if LAKE_TYPE == "rdbms" else n.lower()
+
+    def _resolve_target_path(base_path: str, effective_table: str | None) -> tuple[str, str | None]:
+        """
+        Returns (target_path, sanitized_table_name_or_None).
+
+        If effective_table is provided:
+          - If base_path already ends with effective_table (case-insensitive in parquet mode), don't append again.
+          - Else append base_path/effective_table.
+        If effective_table is None:
+          - Treat base_path as the *table directory* (but in parquet mode lowercase the last path segment).
+          - Refuse if base_path == DELTA_PATH root (to prevent writing all tables into root).
+        """
+        base_path = str(base_path)
+        base_norm = os.path.normpath(base_path)
+
+        if effective_table:
+            t = _sanitize_name(effective_table)
+            base_name = os.path.basename(base_norm)
+
+            if LAKE_TYPE != "rdbms":
+                # parquet/delta: tolerate callers passing mixed-case; treat as same physical dir
+                if base_name.lower() == t.lower():
+                    return base_path, t
+            else:
+                if base_name == t:
+                    return base_path, t
+
+            return os.path.join(base_path, t), t
+
+        # No effective_table: base_path must already be a table directory, not the lake root.
+        if base_norm == lake_root_norm:
+            raise ValueError(
+                "write_to_delta: delta_path points to DELTA_PATH root but no table_name/filename provided; "
+                "refusing to write into lake root."
+            )
+
+        # parquet/delta: enforce lowercase physical directory name for the last segment
+        if LAKE_TYPE != "rdbms":
+            parent = os.path.dirname(base_norm)
+            leaf = os.path.basename(base_norm)
+            leaf_lc = leaf.lower()
+            if leaf != leaf_lc:
+                base_path = os.path.join(parent, leaf_lc)
+
+        # Table name is unknown here; return None so rdbms path doesn't try store_to_rdbms
+        return base_path, None
 
     with log_step(f"Write batch to Delta path {delta_path}"):
-        spark = df.sparkSession
 
-        def _write_single(sub_df, filename):
-            table_name = None
-            target_path = delta_path
-            if filename is not None:
-                table_name = os.path.splitext(os.path.basename(filename))[0].replace(".", "_").replace("-", "_")
-                target_path = os.path.join(delta_path, table_name)
+        def _write_single(sub_df, effective_table: str | None):
+            target_path, sanitized_table = _resolve_target_path(delta_path, effective_table)
 
+            # Drop technical columns if present
             if "data_format" in sub_df.columns:
                 sub_df = sub_df.drop("data_format")
-            drop_cols = [c for c in ["source_filename", "source_data_format"] if c in sub_df.columns]
+            drop_cols = [c for c in ("source_filename", "source_data_format") if c in sub_df.columns]
             if drop_cols:
                 sub_df = sub_df.drop(*drop_cols)
 
             if LAKE_TYPE != "rdbms":
-                try:
-                    if partition_by and partition_by in sub_df.columns:
-                        sub_df.write.format("delta").mode("append").partitionBy(partition_by).save(target_path)
-                    else:
-                        sub_df.write.format("delta").mode("append").save(target_path)
-                    log.info(f"Written batch to Delta Lake at {target_path}")
-                except AnalysisException as e:
-                    log.error(f"Delta Lake AnalysisException: {e}")
-                except Exception as e:
-                    log.error(f"Error saving Delta file {target_path}: {e}")
+                writer = sub_df.write.format("delta").mode("append")
+                if partition_by and partition_by in sub_df.columns:
+                    writer = writer.partitionBy(partition_by)
+                writer.save(target_path)
+                log.info(f"Written batch to Delta Lake at {target_path}")
 
-            if LAKE_TYPE == "rdbms" and table_name is not None:
-                store_to_rdbms(table_name, sub_df)
+            # Keep rdbms behavior unchanged (only when we know the logical table)
+            if LAKE_TYPE == "rdbms":
+                if sanitized_table is None:
+                    raise ValueError(
+                        "write_to_delta: rdbms mode requires table_name or filename to infer target table."
+                    )
+                store_to_rdbms(sanitized_table, sub_df)
 
+        # Case A: split by filename column if present
         if "filename" in df.columns:
             filenames = [r["filename"] for r in df.select("filename").distinct().collect()]
             if len(filenames) == 1:
-                _write_single(df.drop("filename"), filenames[0])
+                fname = filenames[0]
+                tname = os.path.splitext(os.path.basename(fname))[0]
+                _write_single(df.drop("filename"), tname)
             else:
-
                 for fname in filenames:
                     subset = df.where(F.col("filename") == fname).drop("filename")
-                    _write_single(subset, fname)
-        else:
-            _write_single(df, None)
+                    tname = os.path.splitext(os.path.basename(fname))[0]
+                    _write_single(subset, tname)
+            return
+
+        # Case B: no filename, caller provided table_name
+        if table_name:
+            _write_single(df, table_name)
+            return
+
+        # Case C: no filename, no table_name -> delta_path is already the table directory (parquet/delta only)
+        if LAKE_TYPE == "rdbms":
+            raise ValueError(
+                "write_to_delta: rdbms mode requires table_name or filename to infer target table."
+            )
+        _write_single(df, None)
 
 
 def write_to_parquet(spark_df, output_path, mode='append', partition_by=None):
     with log_step(f"Write DataFrame to Parquet {output_path}"):
         try:
-            writer = spark_df.write.format("delta").mode(mode)
+            writer = spark_df.write.mode(mode)
             if partition_by:
                 writer = writer.partitionBy(partition_by)
-
             writer.parquet(output_path)
             log.info(f"Data written to Parquet file {output_path} with mode={mode}")
         except Exception as e:
