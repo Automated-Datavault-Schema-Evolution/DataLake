@@ -363,7 +363,7 @@ def _handle_change_type_delta(operation: pb.Operation) -> pb.OperationResult:
 
         for ddl in (ddl_1, ddl_2):
             try:
-                log.info("Executing Delta ALTER TABLE: %s", ddl)
+                log.info(f"""Executing Delta ALTER TABLE: {ddl}""")
                 spark.sql(ddl)
                 return pb.OperationResult(
                     correlation_id=operation.correlation_id,
@@ -382,13 +382,7 @@ def _handle_change_type_delta(operation: pb.Operation) -> pb.OperationResult:
         try:
             from pyspark.sql import functions as F
 
-            log.warning(
-                "Delta ALTER COLUMN failed; attempting rewrite-cast fallback for %s.%s: %s -> %s",
-                table_name_norm,
-                column_name,
-                current_type,
-                target_type,
-            )
+            log.warning(f"""Delta ALTER COLUMN failed; attempting rewrite-cast fallback for {table_name_norm}.{column_name}: {current_type} -> {target_type}""")
 
             casted = df.withColumn(str(column_name), F.col(str(column_name)).cast(target_type))
 
@@ -586,11 +580,7 @@ def _handle_add_column_delta(operation: pb.Operation) -> pb.OperationResult:
         existing_cols = [f.name for f in df.schema.fields]
 
         if column_name in existing_cols:
-            log.info(
-                "Column %s already exists in Delta table %s; treating as ALREADY_APPLIED",
-                column_name,
-                table_name,
-            )
+            log.info(f"""Column {column_name} already exists in Delta table {table_name}; treating as ALREADY_APPLIED""")
             return pb.OperationResult(
                 correlation_id=operation.correlation_id,
                 plan_id=operation.plan_id,
@@ -603,7 +593,7 @@ def _handle_add_column_delta(operation: pb.Operation) -> pb.OperationResult:
 
         spark_type = _map_logical_to_spark_type(logical_type)
         alter_sql = f"ALTER TABLE delta.`{path}` ADD COLUMNS ({column_name} {spark_type})"
-        log.info("Executing Delta ALTER TABLE: %s", alter_sql)
+        log.info(f"""Executing Delta ALTER TABLE: {alter_sql}""")
 
         try:
             spark.sql(alter_sql)
@@ -611,7 +601,7 @@ def _handle_add_column_delta(operation: pb.Operation) -> pb.OperationResult:
             error_code = ""
             error_message = ""
         except Exception as exc:
-            log.exception("Delta ALTER TABLE failed for %s: %s", table_name, exc)
+            log.exception(f"""Delta ALTER TABLE failed for {table_name}: {exc}""")
             status = pb.OPERATION_STATUS_PERMANENT_ERROR
             error_code = "DELTA_ALTER_FAILED"
             error_message = str(exc)
@@ -925,7 +915,7 @@ def _introspect_delta_table(table_name: str) -> Tuple[List[pb.TableDescriptor], 
     path = _delta_table_path(table_name)
 
     if not _delta_exists(spark, path):
-        log.warning("IntrospectEvidence: Delta table not found at %s", path)
+        log.warning(f"""IntrospectEvidence: Delta table not found at {path}""")
         return [], {"backend": "delta", "table_name": table_name, "exists": False, "path": path}
 
     df = spark.read.format("delta").load(path)
@@ -983,12 +973,7 @@ def _introspect_rdbms_table(table_name: str) -> Tuple[List[pb.TableDescriptor], 
         rows = cur.fetchall()
         cur.close()
     except Exception as exc:
-        log.exception(
-            "IntrospectEvidence: failed to read information_schema for %s.%s: %s",
-            schema_name,
-            tbl_name,
-            exc,
-        )
+        log.exception(f"""IntrospectEvidence: failed to read information_schema for {schema_name}.{tbl_name}: {exc}""")
     finally:
         if conn:
             release_postgres_connection(conn)
@@ -1051,15 +1036,7 @@ class LakeHandlerService(pb_grpc.LakeHandlerServicer):
             kind_name = pb.OperationKind.Name(op.kind)
             layer_name = pb.Layer.Name(op.layer)
 
-            log.info(
-                "LakeHandler.ApplyOperations: plan_id=%s correlation_id=%s layer=%s target=%s kind=%s params=%s",
-                op.plan_id,
-                op.correlation_id,
-                layer_name,
-                op.target,
-                kind_name,
-                dict(op.params),
-            )
+            log.info(f"""LakeHandler.ApplyOperations: plan_id={op.plan_id} correlation_id={op.correlation_id} layer={layer_name} target={op.target} kind={kind_name} params={dict(op.params)}""")
 
             if op.layer != pb.LAYER_LAKE:
                 result = pb.OperationResult(
@@ -1099,12 +1076,7 @@ class LakeHandlerService(pb_grpc.LakeHandlerServicer):
     ) -> pb.EvidenceResponse:
         table_name = _normalize_table_name(request.dataset_id)
 
-        log.info(
-            "LakeHandler.IntrospectEvidence: plan_id=%s correlation_id=%s dataset_id=%s",
-            request.plan_id,
-            request.correlation_id,
-            table_name,
-        )
+        log.info(f"""LakeHandler.IntrospectEvidence: plan_id={request.plan_id} correlation_id={request.correlation_id} dataset_id={table_name}""")
 
         if LAKE_TYPE == "rdbms":
             tables, raw = _introspect_rdbms_table(table_name)
@@ -1139,7 +1111,7 @@ def serve(stop_event: "threading.Event | None" = None) -> None:
 
     listen_addr = f"[::]:{port}"
     server.add_insecure_port(listen_addr)
-    log.info("Starting Lake gRPC handler on %s", listen_addr)
+    log.info(f"""Starting Lake gRPC handler on {listen_addr}""")
 
     server.start()
     log.info("Lake gRPC handler started; waiting for requests from SEF core.")

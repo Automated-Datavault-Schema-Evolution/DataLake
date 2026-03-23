@@ -1,212 +1,112 @@
-# Data Lake Ingestion Service
+# DataLakeHandler
 
-This repository provides a Python based ingestion service that consumes delta from a Kafka topic created by the
-[Filewatcher Service](https://github.com/Automated-Datavault-Schema-Evolution/FileWatcher) and persists the data into a
-Delta Lake or relational database. The service can operate in **streaming** or **bulk** mode and is packaged to run
-locally or via Docker Compose.
+DataLakeHandler consumes row-level file deltas from Kafka and persists them to the configured lake backend. In this stack the service can write to an RDBMS-backed lake or to a filesystem-backed parquet/delta-style lake, and it also exposes a gRPC surface used by SchemaEvolutionFramework during execution and verification.
 
-## Quick Start
+## Responsibilities
 
-1. Copy `.env.docker` from the example in this README and adjust any paths or credentials.
-2. Launch the service with `docker compose up --build`.
-3. Messages arriving at the Kafka topic will be persisted to Delta Lake or PostgreSQL depending on `LAKE_TYPE`.
-4. For local testing without Docker compose you can run `pip install -r requirements.txt` followed by `python main.py`.
+- Consume `csv_deltas` events from Kafka.
+- Group incoming records by logical table name.
+- Normalize table names into backend-safe physical identifiers.
+- Persist rows into the configured lake backend.
+- Expose lake-side gRPC operations for SchemaEvolutionFramework.
 
-## Architecture Overview
+## Architecture
 
-1. **Message Source** – Kafka topic containing JSON messages. Each message represents an incremental CSV update and
-   includes the filename, file format, ingestion timestamp and an array of record dictionaries.
-2. **Spark Structured Streaming** – `main.py` establishes a Spark session and listens to the Kafka topic. Records are
-   parsed and enriched before being written to Delta files. If `LAKE_TYPE` is `rdbms`, each batch is also written to
-   PostgreSQL.
-3. **Bulk Fallback** – If streaming fails or the Kafka backlog exceeds `KAFKA_BACKLOG_THRESHOLD`,
-   the application switches to a plain `KafkaConsumer` to drain buffered messages and
-   write them in one batch to the data lake.
-4. **Delta Storage / Postgres** – Data is stored in Delta format under `DELTA_PATH` and optionally mirrored to a
-   PostgreSQL database. Initial bulk ingestion from existing CSV files is handled by `data_lake.py`.
+### Mermaid processing flow
 
-## Data Flow
-
-```
-Kafka Topic -> Spark Streaming -> Parse & Enrich -> Delta Lake (+ optional Postgres)
+```mermaid
+flowchart TD
+    A[csv_deltas Kafka topic] --> B[Read micro-batch or backlog batch]
+    B --> C[Normalize filename into logical table]
+    C --> D[Build backend write plan]
+    D --> E{LAKE_TYPE}
+    E -->|rdbms| F[Persist to RDBMS table]
+    E -->|parquet| G[Persist to filesystem-backed table]
+    F --> H[Expose lake state over gRPC]
+    G --> H
 ```
 
-* Messages on `KAFKA_TOPIC` are JSON structures with a `data` array. `utils.parse_utils.parse_message_to_row` converts
-  each message to row dictionaries and adds metadata such as the source filename.
-* `main.streaming_ingest()` reads the stream and writes batches to Delta Lake through `utils.lake_utils.write_to_delta`.
-* In bulk mode or as a fallback, `main.bulk_ingest()` consumes records with a traditional Kafka consumer and writes them
-  in one batch.
 
-## Setup
+The production-ready refactor follows a functional-core / imperative-shell layout.
 
-### Requirements
+- `domain/` contains pure rules such as table-name normalization and batching.
+- `core/` contains ingestion orchestration and streaming/bulk execution.
+- `helper/` contains Spark, Kafka, and storage adapters.
+- `utils/` contains compatibility helpers and backend-specific lake utilities.
+- `docs/` contains architecture and function-level documentation.
 
-- Python 3.10
-- Java 11 (required by Spark)
-- Apache Spark with Delta Lake (installed automatically in the Docker image)
-- Access to a Kafka broker and optionally a PostgreSQL database
+## Runtime interfaces
 
-### Installation
+### Inputs
+- Kafka topic: `csv_deltas`
+- gRPC requests from SchemaEvolutionFramework
 
-The easiest way to run the ingestion service is via Docker Compose:
+### Outputs
+- RDBMS tables when `LAKE_TYPE=rdbms`
+- filesystem-backed tables when `LAKE_TYPE=parquet`
+- gRPC responses for discovery, execution, and verification
 
+## Configuration
+
+The primary configuration source is the repo-local `.env` file. It is loaded at runtime and should be versioned separately from environment-specific secrets.
+
+Key groups in `.env`:
+
+### Storage and backend mode
+- `LAKE_TYPE` selects the backend mode: `rdbms` or `parquet`.
+- `DELTA_PATH`, `CHECKPOINT_PATH`, and `HOST_DATA_DIRECTORY` control persisted data and checkpoints.
+- `POSTGRES_*` controls the RDBMS lake connection when `LAKE_TYPE=rdbms`.
+
+### Kafka
+- `KAFKA_BOOTSTRAP_SERVERS`
+- `KAFKA_TOPIC`
+- `KAFKA_GROUP_ID`
+- `KAFKA_STARTING_OFFSETS`
+- `BACKLOG_BATCH_SIZE`
+
+### Processing mode
+- `PROCESSING_MODE` selects `streaming` or `bulk`.
+- `SCHEDULE_TYPE`, `SCHEDULE_CRON`, and `SCHEDULE_INTERVAL_HOURS` control scheduled bulk execution.
+
+### Spark
+- `SPARK_MASTER`
+- `SPARK_DRIVER_MEMORY`, `SPARK_EXECUTOR_MEMORY`
+- `SPARK_DRIVER_CORES`, `SPARK_EXECUTOR_CORES`
+- `SPARK_DYNAMIC_ALLOCATION*`
+- `SPARK_SQL_*`
+
+## Data flow
+
+### Mermaid data-flow diagram
+
+```mermaid
+flowchart LR
+    FW[FileWatcher] -- csv_deltas --> DLH[DataLakeHandler]
+    DLH -- lake tables --> Lake[(Configured lake backend)]
+    SEF[SchemaEvolutionFramework] -- gRPC --> DLH
+    DLH -- discovery / execution responses --> SEF
+```
+
+
+1. FileWatcher publishes appended CSV rows to `csv_deltas`.
+2. DataLakeHandler consumes row events and derives the logical table name from the source filename.
+3. The write planner resolves the backend-specific physical table name.
+4. Records are persisted to the selected lake backend.
+5. SchemaEvolutionFramework can then introspect or execute lake operations over gRPC.
+
+## Operations
+
+### Local run
+```bash
+pip install -r requirements.txt
+python main.py
+```
+
+### Docker Compose
 ```bash
 docker compose up --build
 ```
 
-A `.env.docker` file must be present with the environment variables described below.
-For local development you can create an `.env.local` file instead. Database credentials
-may also be supplied in `postgres/db.env`, which is loaded automatically if present.
+## Licensing model
 
-### Environment Variables
-
-````yaml
-HOST_DATA_ROOT=D:/automated_datavault_schema_evolution__stack/
-HOST_KAFKA_DATA=${HOST_DATA_ROOT}/kafka/data
-HOST_KAFKA_LOGS=${HOST_DATA_ROOT}/kafka/logs
-HOST_ZK_DATA=${HOST_DATA_ROOT}/zookeeper/data
-HOST_ZK_LOG=${HOST_DATA_ROOT}/zookeeper/log
-HOST_PG_DATA=${HOST_DATA_ROOT}/postgres/data
-HOST_HIVE_WAREHOUSE=${HOST_DATA_ROOT}/hive/warehouse
-HOST_SPARK_WAREHOUSE=${HOST_DATA_ROOT}/spark/warehouse
-HOST_SPARK_CHECKPOINTS=${HOST_DATA_ROOT}/spark/checkpoints
-HOST_SPARK_SCRATCH=${HOST_DATA_ROOT}/spark/scratch
-
-  # Python executor paths
-DRIVER_PY=/usr/local/bin/python
-EXEC_PY=/opt/bitnami/python/bin/python
-HOME=/tmp
-
-  # Maven Download of JARS or via docker packages
-ALLOW_MAVEN=0
-
-  # container paths
-CONTAINER_SPARK_WAREHOUSE_DIR=/data/spark/warehouse
-CONTAINER_SPARK_CHECKPOINTS_DIR=/data/spark/checkpoints
-CONTAINER_SCRATCH_DIR=/data/spark/scratch
-
-  # Data lake type: "parquet" to store as Parquet files, or "rdbms" to write to a relational database
-LAKE_TYPE=rdbms
-
-  # Kafka configuration (these point to the externally managed Kafka)
-KAFKA_BOOTSTRAP_SERVERS=kafka:9092
-KAFKA_TOPIC=csv_deltas
-KAFKA_GROUP_ID=delta-streaming
-KAFKA_STARTING_OFFSETS=earliest     # 'earliest' to read all messages
-BACKLOG_BATCH_SIZE=500              # messages drained per backlog batch
-
-PROCESSING_MODE=streaming           # options: streaming or bulk
-
-SCHEDULE_TYPE=interval      # options: "cron" or "interval"
-SCHEDULE_CRON=0 3 * * *     # Used if SCHEDULE_TYPE=cron (at 03:00 daily, cron syntax)
-SCHEDULE_INTERVAL_HOURS=4   # Used if SCHEDULE_TYPE=interval
-
-SPARK_MASTER=spark://datalake-ingestion-spark-master:7077
-SPARK_DRIVER_MEMORY=16g      # Spark driver JVM memory
-SPARK_EXECUTOR_MEMORY=16g    # Executor JVM memory per worker
-SPARK_DRIVER_CORES=8        # Cores for the driver
-SPARK_EXECUTOR_CORES=8      # Cores per executor
-SPARK_SQL_SHUFFLE_PARTITIONS=48
-SPARK_DYNAMIC_ALLOCATION=true
-SPARK_DYNAMIC_ALLOCATION_MIN_EXECUTORS=1
-SPARK_DYNAMIC_ALLOCATION_MAX_EXECUTORS=10
-SPARK_DYNAMIC_ALLOCATION_INITIAL_EXECUTORS=1
-SPARK_SERIALIZER=org.apache.spark.serializer.KryoSerializer
-SPARK_KRYO_BUFFER_MAX=256m
-SPARK_ADAPTIVE_EXECUTION=true
-SPARK_DYNAMIC_SHUFFLE_TRACKING=true
-SPARK_AUTOSCALE=false           # enable Docker based scaling of workers
-SPARK_WORKER_MAX=5              # upper limit for auto-scaled workers
-SPARK_WORKER_MIN=1              # minimum number of workers to maintain
-SPARK_WORKER_IMAGE=bitnami/spark:3.5.6
-SPARK_WORKER_CONTAINER_PREFIX=spark-worker-
-SPARK_WORKER_CPU_THRESHOLD=60   # CPU percent usage triggering scale up
-DOCKER_NETWORK=data-automation-net
-SPARK_SQL_ADAPTIVE_COALESCE_PARTITIONS=true
-SPARK_SQL_ADAPTIVE_ADVISORY_PARTITION_SIZE=64m
-
-
-HOST_DATA_DIRECTORY=${HOST_DATA_ROOT}/data_lake
-CHECKPOINT_PATH=${HOST_DATA_DIRECTORY}/checkpoints
-DELTA_PATH=${HOST_DATA_DIRECTORY}/data
-
-  ## Postgres
-POSTGRES_HOST=host.docker.internal
-POSTGRES_PORT=5432
-POSTGRES_DB=datalake
-POSTGRES_USER=postgres
-POSTGRES_PASSWORD=postgres
-POSTGRES_POOL_MIN=1
-POSTGRES_POOL_MAX=5
-
-````
-
-Enabling `SPARK_DYNAMIC_ALLOCATION` allows the Spark cluster to grow or shrink
-between `SPARK_DYNAMIC_ALLOCATION_MIN_EXECUTORS` and
-`SPARK_DYNAMIC_ALLOCATION_MAX_EXECUTORS` based on load.
-`SPARK_SERIALIZER` and `SPARK_KRYO_BUFFER_MAX` enable the faster Kryo serializer
-with an increased buffer to avoid large task warnings. `SPARK_ADAPTIVE_EXECUTION`
-and `SPARK_DYNAMIC_SHUFFLE_TRACKING` allow Spark to optimize shuffle partitions
-and scale executors dynamically without restarting the application.
-
-When `SPARK_AUTOSCALE` is enabled the application will use the Docker API to
-start additional Spark worker containers when existing workers exceed
-`SPARK_WORKER_CPU_THRESHOLD` percent CPU usage. Workers are named using
-`SPARK_WORKER_CONTAINER_PREFIX` and will not exceed `SPARK_WORKER_MAX`.
-
-When the Kafka backlog exceeds `KAFKA_BACKLOG_THRESHOLD`, messages are drained
-in batches of size `BACKLOG_BATCH_SIZE` until the backlog is cleared.
-If the application recognizes a backlog, then the whole backlog will be drained.
-
-Database settings if using the RDBMS mode
-Below is a brief description of the most important variables:
-
-- `LAKE_TYPE` defines whether data is only kept in Delta files (`parquet`) or also mirrored to Postgres (`rdbms`).
-- `PROCESSING_MODE` chooses between continuous streaming from Kafka or scheduled bulk imports.
-- `KAFKA_BACKLOG_THRESHOLD` controls when the service falls back to batch mode if the topic accumulates too many
-  messages.
-- `BACKLOG_BATCH_SIZE` limits how many messages are drained in one run during backlog processing.
-- The `SPARK_*` parameters tune Spark resources and enable automatic scaling when dynamic allocation is turned on.
-
-````yaml
-POSTGRES_HOST=host.docker.internal
-POSTGRES_PORT=5432
-POSTGRES_DB=datalake
-POSTGRES_USER=postgres
-POSTGRES_PASSWORD=postgres
-POSTGRES_POOL_MIN=1
-POSTGRES_POOL_MAX=5
-````
-
-Use these parameters to point the service to your PostgreSQL database. Leave them blank if you do not need RDBMS
-support.
-
-## Components
-
-| File                  | Description                                                                                                                         |
-|-----------------------|-------------------------------------------------------------------------------------------------------------------------------------|
-| `main.py`             | Entry point for the ingestion service. Handles streaming ingestion from Kafka with a fallback to bulk mode and optional scheduling. |
-| `utils/`              | Helper modules for Kafka connectivity, Spark session creation, parsing messages, offset handling and writing to Delta/Postgres.     |
-| `docker-compose.yaml` | Defines the containerized setup for running the service together with its dependencies.                                             |
-| `Dockerfile`          | Builds the Python image with Java, Spark and all required libraries.                                                                |
-
-## Running the Service
-
-1. Prepare your environment variables in `.env` or `.env.docker`.
-   If PostgreSQL is used, place the credentials in `postgres/db.env`.
-2. Ensure Kafka and (optionally) PostgreSQL are accessible.
-3. Start the application using Docker Compose or run `python main.py` locally.
-
-## Data Persistence
-
-- **Delta Lake** – Parquet-Files are stored under the directory pointed to by `DELTA_PATH`. If files are not existed,
-  the application creates them automatically.
-- **PostgreSQL** – When `LAKE_TYPE=rdbms`, `utils.lake_utils.store_to_rdbms` writes each batch to a table named after
-  the source filename. Tables are created automatically if they do not exist.
-
-## Scheduling
-
-Bulk mode can be scheduled via APScheduler using either cron expressions or fixed hourly intervals, defined by
-`SCHEDULE_TYPE`, `SCHEDULE_CRON` and `SCHEDULE_INTERVAL_HOURS`.
-
-## License
+This repository is licensed under the Apache License, Version 2.0. You may use, modify, and distribute the code in accordance with the terms in `LICENSE`. Any deployment-specific data, secrets, and infrastructure configuration remain outside the scope of the code license.

@@ -84,11 +84,11 @@ def get_spark_session(app_name="Kafka_Consumer_Lake_Handler"):
         ]
         existing_jars = [p for p in requested_jars if os.path.exists(p)]
         for p in requested_jars:
-            log.info(f"[JAR_CHECK] {p} exists={os.path.exists(p)}")
+            log.info(f"[DLH][JAR_CHECK] {p} exists={os.path.exists(p)}")
         if existing_jars:
             builder = builder.config("spark.jars", ",".join(existing_jars))
         else:
-            log.warning("[JAR_CHECK] None of the expected jars were found under /opt/(delta-jars|ext-jars). "
+            log.warning("[DLH][JAR_CHECK] None of the expected jars were found under /opt/(delta-jars|ext-jars). "
                         "Spark may try Ivy (Maven) if ALLOW_MAVEN=1.")
 
         # Optional online fallback if ALLOW_MAVEN=1

@@ -1,6 +1,9 @@
+"""Lake persistence helpers for Delta files and PostgreSQL-backed lake mode."""
+
 import os
 from datetime import datetime
 
+from domain.table_naming import physical_table_name
 from logger import log, log_step
 from psycopg2.extras import execute_values
 from psycopg2.pool import SimpleConnectionPool
@@ -15,8 +18,12 @@ from config import (
     POSTGRES_POOL_MAX, POSTGRES_POOL_MIN, LAKE_TYPE, DELTA_PATH,
 )
 
-# Global connection pool for PostgreSQL
 PG_POOL = None
+
+
+def _physical_rdbms_table_name(name: str) -> str:
+    """Return the physical PostgreSQL identifier for a logical lake table name."""
+    return physical_table_name(name, "rdbms")
 
 
 def write_to_delta(df, delta_path, partition_by=None, table_name=None):
@@ -46,12 +53,7 @@ def write_to_delta(df, delta_path, partition_by=None, table_name=None):
     delta_path_norm = os.path.normpath(str(delta_path))
 
     def _sanitize_name(name: str) -> str:
-        n = (name or "").strip()
-        # strip optional schema
-        if "." in n:
-            n = n.split(".", 1)[-1]
-        n = n.strip('"').replace(".", "_").replace("-", "_")
-        return n if LAKE_TYPE == "rdbms" else n.lower()
+        return physical_table_name(name, LAKE_TYPE)
 
     def _resolve_target_path(base_path: str, effective_table: str | None) -> tuple[str, str | None]:
         """
@@ -379,6 +381,8 @@ def store_to_rdbms(table_name, df, batch_size: int = 5000):
         else:
             schema_name, tbl_name = "public", table_name
 
+        tbl_name = _physical_rdbms_table_name(tbl_name)
+
         def _pg_identifier(name: str) -> str:
             """Quote an identifier for PostgreSQL."""
             return '"' + name.replace('"', '""') + '"'
@@ -405,7 +409,7 @@ def store_to_rdbms(table_name, df, batch_size: int = 5000):
         field_types = {f.name: f.dataType for f in df.schema.fields}
         # Helpful schema log (ordered) so you can diff quickly
         pretty_types = ", ".join(f"{c}:{type(field_types[c]).__name__}" for c in cols)
-        log.info(f"[{schema_name}.{tbl_name}] Batch schema ({len(cols)} cols): {pretty_types}")
+        log.info(f"[DLH][{schema_name}.{tbl_name}] Batch schema ({len(cols)} cols): {pretty_types}")
 
         col_defs = ", ".join(f"{_pg_identifier(c)} {_spark_to_pg_type(field_types[c])}" for c in cols)
 
@@ -420,8 +424,8 @@ def store_to_rdbms(table_name, df, batch_size: int = 5000):
             f'INSERT INTO {_pg_identifier(schema_name)}.{_pg_identifier(tbl_name)} '
             f'({insert_cols_sql}) VALUES %s'
         )
-        log.info("[DDL] Ensure schema SQL:\n" + create_schema_sql + " ")
-        log.info(f"[DDL] Ensure table SQL for {schema_name}.{tbl_name}:\n" + create_table_sql + " ")
+        log.info("[DLH][DDL] Ensure schema SQL:\n" + create_schema_sql + " ")
+        log.info(f"[DLH][DDL] Ensure table SQL for {schema_name}.{tbl_name}:\n" + create_table_sql + " ")
 
         conn = None
         try:
@@ -445,9 +449,9 @@ def store_to_rdbms(table_name, df, batch_size: int = 5000):
                 (schema_name, tbl_name)
             )
             existing_cols = [r[0] for r in cur.fetchall()]
-            log.info(f"[{schema_name}.{tbl_name}] Existing columns in DB ({len(existing_cols)}): {existing_cols}")
-            log.info(f"[{schema_name}.{tbl_name}] Insert columns ({len(cols)}): {cols}")
-            log.debug(f'[INSERT SQL] {insert_sql}')
+            log.info(f"[DLH][{schema_name}.{tbl_name}] Existing columns in DB ({len(existing_cols)}): {existing_cols}")
+            log.info(f"[DLH][{schema_name}.{tbl_name}] Insert columns ({len(cols)}): {cols}")
+            log.debug(f'[DLH][INSERT SQL] {insert_sql}')
 
             from psycopg2.extras import execute_values
 
@@ -531,11 +535,11 @@ def ensure_postgres_database():
                     exists = cur.fetchone() is not None
                     if not exists:
                         create_sql = f"CREATE DATABASE {_pg_ident(db)} ENCODING 'UTF8' TEMPLATE template0"
-                        log.info(f"[DDL] {create_sql};")
+                        log.info(f"[DLH][DDL] {create_sql};")
                         cur.execute(create_sql)
                         if owner:
                             alter_sql = f"ALTER DATABASE {_pg_ident(db)} OWNER TO {_pg_ident(owner)}"
-                            log.info(f"[DDL] {alter_sql};")
+                            log.info(f"[DLH][DDL] {alter_sql};")
                             cur.execute(alter_sql)
                     else:
                         log.info(f"Database '{db}' already exists.")
