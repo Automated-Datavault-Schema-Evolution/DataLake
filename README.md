@@ -75,6 +75,55 @@ Key groups in `.env`:
 - `SPARK_DYNAMIC_ALLOCATION*`
 - `SPARK_SQL_*`
 
+## Environment variables
+
+Keep deployment-specific secrets and hostnames in the environment. Keep operational defaults in the application configuration and override them only when needed.
+
+### Required environment variables
+
+Set these values explicitly for every deployment.
+
+```dotenv
+# Backend mode
+LAKE_TYPE=rdbms
+DELTA_PATH=/data/lake
+CHECKPOINT_PATH=/tmp/datalake/checkpoints
+
+# Kafka
+KAFKA_BOOTSTRAP_SERVERS=kafka:9092
+KAFKA_TOPIC=csv_deltas
+KAFKA_GROUP_ID=datalake-handler
+
+# RDBMS lake mode
+POSTGRES_HOST=postgres
+POSTGRES_PORT=5432
+POSTGRES_DB=datalake
+POSTGRES_USER=postgres
+POSTGRES_PASSWORD=change_me
+POSTGRES_SCHEMA=public
+```
+
+### Optional overrides
+
+Only set these when the deployment needs behavior different from the built-in defaults.
+
+```dotenv
+HOST_DATA_DIRECTORY=./data
+KAFKA_STARTING_OFFSETS=latest
+BACKLOG_BATCH_SIZE=1000
+
+PROCESSING_MODE=streaming
+SCHEDULE_TYPE=interval
+SCHEDULE_CRON=0 */6 * * *
+SCHEDULE_INTERVAL_HOURS=6
+
+SPARK_MASTER=local[*]
+SPARK_DRIVER_MEMORY=2g
+SPARK_EXECUTOR_MEMORY=2g
+SPARK_DRIVER_CORES=1
+SPARK_EXECUTOR_CORES=1
+```
+
 ## Data flow
 
 ### Mermaid data-flow diagram
